@@ -46,13 +46,18 @@ class ViTPageEncoder:
         import torch
         from transformers import AutoImageProcessor, AutoModel
         self._processor = AutoImageProcessor.from_pretrained(self.model_name)
-        self._model = AutoModel.from_pretrained(self.model_name).eval().to(self.device)
+        model = AutoModel.from_pretrained(self.model_name).eval().to(self.device)
+        self._model = model
+        # Model đa phương thức (CLIP, ...): AutoModel trả về wrapper cần cả
+        # input_ids cho nhánh text. Chỉ cần nhánh vision -> gọi thẳng submodule.
+        self._vision_model = getattr(model, "vision_model", model)
         self._torch = torch
 
     @property
     def output_dim(self) -> int:
         self._lazy_load()
-        return self._model.config.hidden_size
+        return getattr(self._vision_model.config, "hidden_size",
+                       self._model.config.hidden_size)
 
     def encode(self, images: Sequence[Image.Image]) -> np.ndarray:
         self._lazy_load()
@@ -60,8 +65,9 @@ class ViTPageEncoder:
         for i in range(0, len(images), self.batch_size):
             batch = list(images[i:i + self.batch_size])
             inputs = self._processor(images=batch, return_tensors="pt").to(self.device)
+            pixel_values = inputs["pixel_values"]
             with self._torch.no_grad():
-                o = self._model(**inputs)
+                o = self._vision_model(pixel_values=pixel_values)
             out.append(o.last_hidden_state[:, 0, :].cpu().numpy())  # CLS token
         return np.concatenate(out, axis=0).astype(np.float32)
 

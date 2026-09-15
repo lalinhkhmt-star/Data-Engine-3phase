@@ -142,3 +142,47 @@ chọn ViT nào.
   hay công thức dày đặc mà paper MinerU2.5-Pro nhấn mạnh là long-tail khó.
   Cân nhắc bổ sung PubTables-1M (bảng) hoặc PDF arXiv toán học (công thức)
   cho vòng đánh giá tiếp theo.
+
+## 7. Kết quả thực chạy (300 trang, GPU RTX 5060 Ti)
+
+Đã chạy đủ 4 model trên toàn bộ mẫu 300 trang (`--k 6`, đối chiếu với
+`metadata.doc_category`). Xếp hạng theo NMI của candidate `vit`:
+
+| Hạng | Model | NMI (vit) | Purity |
+|---|---|---|---|
+| 🥇 1 | `openai/clip-vit-base-patch32` | **0.403** | 0.553 |
+| 2 | `microsoft/dit-base` | 0.211 | 0.417 |
+| 3 | `facebook/dinov2-base` | 0.196 | 0.340 |
+| 4 | `facebook/dinov2-small` | 0.155 | 0.357 |
+
+→ `openai/clip-vit-base-patch32` là output K-Means "đúng nhất" — cụm của nó
+khớp với 6 loại tài liệu thật tốt hơn hẳn 3 model còn lại (NMI gấp ~2x model
+đứng thứ 2).
+
+Cách đọc nhanh trong từng file JSON kết quả (`data/results_*.json`): mở key
+`"vit"` → xem field `"nmi"` — số càng cao (gần 1.0) thì cụm càng khớp nhãn
+thật. Ví dụ `data/results_dinov2_small.json` có `"vit": {"nmi": 0.155...}` —
+đây là kết quả thấp nhất trong 4 model, không phải cái nên chọn.
+
+**Lưu ý quan trọng — CLIP thắng không đồng đều giữa các loại tài liệu.** Soi
+ma trận nhầm lẫn của CLIP (`data/results_openai_clip-vit-base-patch32.json`):
+- `laws_and_regulations` (40/50) và `manuals` (41/50) tách rất sạch vào 1 cụm
+  riêng.
+- `financial_reports` và `government_tenders` bị **trộn vào cùng 1 cụm**
+  (29/50 và 33/50 cùng rơi vào cụm 0) — hai loại này nhìn bề ngoài giống nhau
+  (đều nhiều bảng số liệu), CLIP không tách được.
+- `patents` **tán loạn khắp 5 cụm**, không có cụm nào chiếm ưu thế rõ.
+
+Nên "đúng nhất" ở đây là *tốt nhất trong 4 lựa chọn đã test trên mẫu nhỏ*,
+không phải "đã hoàn hảo" — trước khi chốt `EmbedConfig.vit_name` sang CLIP,
+nên chạy lại với `--per-category 200+` (mục 6) và tìm hiểu vì sao
+financial/government-tenders bị trộn và patents không tách được (có thể cần
+thêm tín hiệu ngoài thị giác thuần, ví dụ text embedding).
+
+Ngoài ra, giả thuyết ban đầu ở mục 1 ("domain tài liệu thật sẽ thắng domain
+ảnh tự nhiên") **không được xác nhận theo hướng dự kiến**: `dit-base` (pretrain
+trên 11M ảnh tài liệu) chỉ nhỉnh hơn `dinov2-base` một chút (0.211 vs 0.196),
+trong khi `clip-vit-base-patch32` (cũng domain ảnh tự nhiên, nhưng pretrain
+contrastive image-text thay vì self-supervised patch-level) thắng đứt cả hai.
+Gợi ý: mục tiêu pretrain (contrastive vs masked-image-modeling) có thể quan
+trọng hơn domain ảnh đối với bài toán phân biệt bố cục tài liệu ở mức thô.
