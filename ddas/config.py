@@ -13,8 +13,9 @@ class EmbedConfig:
     layout_dim: int = 24                         # histogram loại element + mật độ + #cột
     visual_weight: float = 1.0
     layout_weight: float = 0.6                   # task-aware: tách trang theo cấu trúc, không chỉ "nhìn giống nhau"
-    # Nguồn layout-prior: 'pdf' (PyMuPDF, CPU, ~free) cho born-digital, 'yolo' cho trang scan.
-    layout_source_order: Tuple[str, ...] = ("pdf", "yolo")
+    # Nguồn layout-prior: 'pdf' (PyMuPDF, CPU, ~free) cho born-digital,
+    # 'docling-layout-heron' (RT-DETRv2, GPU) cho trang scan — xem layout_heron.py.
+    layout_source_order: Tuple[str, ...] = ("pdf", "docling-layout-heron")
     batch_size: int = 512
     fp16: bool = True
 
@@ -88,11 +89,32 @@ class SamplerConfig:
 
 
 @dataclass
+class JudgeRefineConfig:
+    """§3.3 — vòng lặp render-then-verify + hàng đợi chú thích thủ công."""
+    max_rounds: int = 3             # paper không ghi số; 3 vòng là điểm cân bằng chi phí/độ hồi phục
+    dpi: int = 150
+    latex_backends: Tuple[str, ...] = ("pdflatex", "mathtext")
+    # Subtask có đường render (formula->LaTeX, table->HTML). text vẫn chạy được
+    # vòng judge nhưng chỉ so với ẢNH GỐC (không có ảnh render để đối chiếu);
+    # layout không có chuỗi nháp nên đi thẳng sang người.
+    renderable: Tuple[str, ...] = ("formula", "table")
+    judgeable: Tuple[str, ...] = ("formula", "table", "text")
+    # Vòng sau sửa gần như không khác vòng trước mà VẪN báo lỗi => refine bí,
+    # dừng sớm thay vì đốt thêm lời gọi model.
+    converge_tau: float = 0.995
+    # Ngưỡng coi là "judge khoanh được lỗi một cách chắc chắn" — dùng cho tiêu
+    # chí ưu tiên #1 (correction efficiency) khi xếp hàng đợi người.
+    min_confidence: float = 0.70
+    expert_budget: int = 192_000    # số mẫu chú thích tay, theo paper (dòng 66)
+
+
+@dataclass
 class DDASConfig:
     embed: EmbedConfig = field(default_factory=EmbedConfig)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
     cmcv: CMCVConfig = field(default_factory=CMCVConfig)
     probe: ProbeConfig = field(default_factory=ProbeConfig)
     sampler: SamplerConfig = field(default_factory=SamplerConfig)
+    judge: JudgeRefineConfig = field(default_factory=JudgeRefineConfig)
     pool_size: int = 500_000_000
     page_budget: int = 60_000_000

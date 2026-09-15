@@ -157,13 +157,21 @@ def confusion(pred: np.ndarray, true_labels: List[str]) -> Dict[str, Dict[int, i
     return {k: dict(v) for k, v in out.items()}
 
 
+def assignments(pred: np.ndarray, true_labels: List[str], paths: List[Path]) -> Dict[str, list]:
+    """file -> cluster, gộp theo cluster để dễ soi."""
+    by_cluster: Dict[str, list] = defaultdict(list)
+    for p, t, path in zip(pred, true_labels, paths):
+        by_cluster[str(int(p))].append({"file": f"{path.parent.name}/{path.name}", "true_label": t})
+    return dict(sorted(by_cluster.items(), key=lambda kv: int(kv[0])))
+
+
 def run_kmeans(X: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
     from sklearn.cluster import KMeans
     return KMeans(n_clusters=k, n_init=10, random_state=seed).fit_predict(X)
 
 
 def evaluate(candidates: Dict[str, np.ndarray], labels: List[str], k: Optional[int],
-            unsupervised: bool) -> Dict[str, dict]:
+            unsupervised: bool, paths: Optional[List[Path]] = None) -> Dict[str, dict]:
     from sklearn.metrics import normalized_mutual_info_score, silhouette_score
 
     true_k = len(set(labels)) if not unsupervised else (k or 8)
@@ -179,6 +187,8 @@ def evaluate(candidates: Dict[str, np.ndarray], labels: List[str], k: Optional[i
             row["purity"] = purity(pred, labels)
             row["nmi"] = float(normalized_mutual_info_score(labels, pred))
             row["confusion"] = confusion(pred, labels)
+        if paths is not None:
+            row["assignments"] = assignments(pred, labels, paths)
         results[name] = row
     return results
 
@@ -268,16 +278,11 @@ def main():
               f"candidate 'layout' và 'vit+layout' sẽ kém tin cậy trên phần còn lại "
               f"(chúng là trang scan thuần hoặc ảnh, layout-prior = vector 0).", file=sys.stderr)
 
-    results = evaluate(candidates, labels, args.k, args.unsupervised)
+    results = evaluate(candidates, labels, args.k, args.unsupervised, paths=paths)
     print_report(results, args.unsupervised)
 
     if args.out:
-        serializable = {name: {k: v for k, v in r.items() if k != "confusion"}
-                        for name, r in results.items()}
-        for name, r in results.items():
-            if "confusion" in r:
-                serializable[name]["confusion"] = r["confusion"]
-        args.out.write_text(json.dumps(serializable, indent=2, ensure_ascii=False))
+        args.out.write_text(json.dumps(results, indent=2, ensure_ascii=False))
         print(f"\nĐã lưu {args.out}", file=sys.stderr)
 
 

@@ -1,10 +1,29 @@
 """CMCV — Cross-Model Consistency Verification (Section 3.2) với cascade.
 
+Bộ 3 model chọn riêng cho tiếng Việt (thay cho MinerU2.5 gốc — MinerU huấn
+luyện chủ yếu trên corpus tiếng Trung/Anh, không phải mục tiêu tối ưu ở đây):
+  - TARGET_MODEL (Qwen3-VL, TỰ HOST) là model đang được cải thiện — output
+    của nó trên trang Easy trở thành nhãn SFT, nên phải là model bạn thực sự
+    định tiếp tục fine-tune. Hai model dưới đây gọi qua API, KHÔNG fine-tune
+    được (closed-weight) nên không thể làm target.
+  - CHEAP_EXTERNAL (Mistral OCR, qua API) — $4/1000 trang, output có sẵn
+    bbox + 13 loại block + bảng/công thức dạng structured JSON, khớp gần
+    đúng format ParseResult cần, không phải tự parse text thô.
+  - EXPENSIVE_EXTERNAL (Gemini 3 Pro, qua API) — trọng tài cho case Hard,
+    chỉ gọi khi cascade không cắt được nên tần suất thấp, chấp nhận giá cao
+    hơn ($2/$12 mỗi triệu token in/out). LƯU Ý: Gemini 2.5 Pro đã bị Google
+    khai tử (16/10/2026) — đừng dùng nhầm bản cũ.
+  - Cả hai external đều khác lineage với target (Mistral Pháp, Google Mỹ,
+    Qwen Alibaba Trung Quốc) nên "đồng thuận" có ý nghĩa thật — nhưng vẫn
+    PHẢI đo lại trên dev-set tiếng Việt bằng calibrate_tau() trước khi tin,
+    đừng mặc định giả định "đồng thuận ⇒ đúng". Nếu nghi lỗi tương quan giữa
+    2 external, dùng key GPT-4o/GPT-5 (ChatGPT) làm model thứ 3 kiểm tra.
+
 Điểm cốt lõi so với bản trong paper: thứ tự đánh giá được sắp xếp lại thành
-cascade *không đổi nhãn* (lossless). Vì Easy chỉ cần MinerU đồng thuận với
-ÍT NHẤT MỘT external model, nên khi MinerU ~ PaddleOCR-VL (hai model <1.5B, rẻ)
-ta đã kết luận được Easy mà không cần gọi Qwen3-VL-30B.
-=> tiết kiệm ~60% lời gọi model đắt nhất, nhãn cuối hoàn toàn giống hệt.
+cascade *không đổi nhãn* (lossless). Vì Easy chỉ cần target đồng thuận với
+ÍT NHẤT MỘT external model, nên khi target ~ Mistral OCR (rẻ) ta đã kết luận
+được Easy mà không cần gọi Gemini 3 Pro (đắt hơn nhiều lần trên mỗi trang).
+=> tiết kiệm phần lớn lời gọi model đắt nhất, nhãn cuối hoàn toàn giống hệt.
 """
 from __future__ import annotations
 
@@ -17,11 +36,10 @@ import numpy as np
 from .config import CMCVConfig
 from .metrics import SIM_FN, layout_sim
 
-MINERU, PADDLE, QWEN = "mineru2.5", "paddleocr-vl", "qwen3-vl-30b"
-TARGET_MODEL = MINERU                      # model đang được cải thiện
-EXTERNALS = (PADDLE, QWEN)
-CHEAP_EXTERNAL = PADDLE                    # ~0.9B, chạy được trên toàn pool
-EXPENSIVE_EXTERNAL = QWEN                  # ~30B MoE, chỉ gọi khi cascade không cắt được
+TARGET_MODEL = "qwen3-vl-8b"                # model đang được cải thiện — TỰ HOST
+CHEAP_EXTERNAL = "mistral-ocr-4"            # qua API, ~$4/1000 trang, chạy được trên toàn pool
+EXPENSIVE_EXTERNAL = "gemini-3-pro"         # qua API, trọng tài, chỉ gọi khi cascade không cắt được
+EXTERNALS = (CHEAP_EXTERNAL, EXPENSIVE_EXTERNAL)
 
 
 class Tier(str, Enum):
@@ -77,7 +95,7 @@ def pair_sims(r1: ParseResult, r2: ParseResult) -> Dict[str, float]:
 
 def assign_tier(s_mp: float, s_mq: Optional[float], s_pq: Optional[float],
                 tau: float, require_3way: bool = False) -> Tier:
-    """Phân tầng theo đúng taxonomy Section 3.2, neo vào MinerU2.5.
+    """Phân tầng theo đúng taxonomy Section 3.2, neo vào TARGET_MODEL.
 
     s_mq / s_pq = None nghĩa là cascade đã cắt sớm (chưa chạy model đắt).
     """
@@ -90,12 +108,14 @@ def assign_tier(s_mp: float, s_mq: Optional[float], s_pq: Optional[float],
     elif agree_mp or agree_mq:
         return Tier.EASY
     if s_pq is not None and s_pq >= tau:
-        return Tier.MEDIUM                 # hai external đồng thuận, MinerU lệch
+        return Tier.MEDIUM                 # hai external đồng thuận, target lệch
     return Tier.HARD
 
 
-def _label_source(tier: Tier) -> Optional[str]:
-    return {Tier.EASY: MINERU, Tier.MEDIUM: PADDLE, Tier.HARD: None,
+def label_source(tier: Tier) -> Optional[str]:
+    """Model nào cung cấp pseudo-label cho tier này. None = chưa có nhãn tin
+    cậy (Hard/Invalid) — dùng khi lắp ráp SFT set, xem sft.py."""
+    return {Tier.EASY: TARGET_MODEL, Tier.MEDIUM: CHEAP_EXTERNAL, Tier.HARD: None,
             Tier.INVALID: None}[tier]
 
 
@@ -104,8 +124,9 @@ def _label_source(tier: Tier) -> Optional[str]:
 class CMCV:
     """Chạy CMCV trên một trang. `runners` là dict model_name -> callable(page)->ParseResult.
 
-    Cascade tiết kiệm: gọi MinerU + PaddleOCR trước; chỉ gọi Qwen3-VL-30B khi
-    tồn tại subtask mà MinerU và PaddleOCR bất đồng.
+    Cascade tiết kiệm: gọi target (Qwen3-VL, tự host) + Mistral OCR (API) trước;
+    chỉ gọi model đắt (Gemini 3 Pro, API) khi tồn tại subtask mà hai model rẻ
+    bất đồng.
     """
 
     def __init__(self, runners: Dict[str, Callable[[str], ParseResult]],
@@ -125,11 +146,11 @@ class CMCV:
                               {t: {} for t in subtasks}, False,
                               {t: None for t in subtasks})
 
-        rm = self.runners[MINERU](page_id)
+        rm = self.runners[TARGET_MODEL](page_id)
         rp = self.runners[CHEAP_EXTERNAL](page_id)
         s_mp = pair_sims(rm, rp)
 
-        # Subtask nào MinerU ~ Paddle thì đã là Easy -> không cần model đắt.
+        # Subtask nào target ~ Mistral OCR thì đã là Easy -> không cần model đắt.
         need_q = [t for t in subtasks
                   if s_mp[t] < self.cfg.tau[t] or self.cfg.require_3way_for_easy]
         run_q = (not self.cfg.cascade) or bool(need_q)
@@ -148,7 +169,7 @@ class CMCV:
                                self.cfg.require_3way_for_easy)
             tiers[t] = tier
             sims[t] = {"M-P": s_mp[t], "M-Q": mq, "P-Q": pq}
-            src[t] = _label_source(tier)
+            src[t] = label_source(tier)
         return CMCVRecord(page_id, tiers, sims, rq is not None, src)
 
     @property

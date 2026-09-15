@@ -1,23 +1,38 @@
 # Data Engine — Phần 1: DDAS
 
 Triển khai Phần 1 (Section 3.1, *Diversity-and-Difficulty-Aware Sampling*) của Data Engine
-kiểu MinerU2.5-Pro, kèm CMCV (3.2) ở mức đủ để Phần 1 chạy được.
+kiểu MinerU2.5-Pro, kèm CMCV (3.2) ở mức đủ để Phần 1 chạy được, và §3.3
+(*Annotation Pipeline for Hard Case*) xử lý tiếp hàng đợi Hard mà 3.2 để lại.
 
 ```
 ddas/
   config.py     cấu hình + ngân sách
   metrics.py    NED / TEDS / CDM-proxy / layout-F1  (CPU, O(n))
-  cmcv.py       CMCV có cascade — bỏ qua model 30B khi 2 model rẻ đã đồng thuận
+  cmcv.py       CMCV có cascade — bỏ qua model đắt (Gemini 3 Pro, API) khi target (Qwen3-VL,
+                tự host) và Mistral OCR (API) đã đồng thuận
   cluster.py    K-Means phân cấp + kênh tail + khử trùng lặp LSH
   density.py    độ hiếm cục bộ + chẩn đoán tự bật/tắt
   probe.py      probe-and-extrapolate: trọng số cụm từ ~3% pool
-  element.py    CMCV mức element dẫn xuất từ CMCV trang (0 GPU-hour thêm)
+  element.py    Stage 2 đầy đủ: layout detection (Heron) CHẠY TRƯỚC ra bbox+class
+                độc lập, rồi tra nội dung target/cheap/expensive theo IoU (0 suy luận
+                CMCV thêm) + crop-embed + cluster riêng theo loại element + lấy mẫu
+                lồng nhau cho text/formula/table (tách quota khỏi layout)
   sampler.py    phân bổ lồng nhau (cây cụm x độ khó) + water-filling
   embed_real.py    encoder ViT-base THẬT (HF transformers) + layout-prior + ghép đặc trưng
   layout_prior.py  đặc trưng hình học 24-d từ text layer PDF (PyMuPDF), không cần GPU
+  layout_heron.py  Docling Layout Heron v0 (RT-DETRv2, GPU) — 2 vai trò: layout-prior
+                24-d cho trang scan ở Stage 1, VÀ nguồn bbox+class cho Stage 2 (element.py)
   testkit/eval_embedding.py   đo purity/NMI: ViT thuần vs layout thuần vs ghép — CHẠY TRÊN DỮ LIỆU THẬT
-  pipeline.py   orchestrator 9 bước
-  costmodel.py  mô hình chi phí GPU/lưu trữ
+  pipeline.py   orchestrator — run() cho layout (mức trang), run_elements() cho
+                text/formula/table (mức element), assemble_sft_set() gộp cả 4 subtask
+  sft.py        Final sampling: tra pseudo-label đúng theo tier (Easy→target,
+                Medium→cheap-external), gộp layout+text+formula+table thành 1 dataset;
+                Hard/Invalid tách sang hàng đợi riêng (chưa có nhãn tin cậy)
+  render.py     §3.3 render-then-verify: LaTeX→ảnh (pdflatex/mathtext), HTML table→ảnh
+                (pymupdf.Story) — biến lỗi cấu trúc thành khác biệt nhìn thấy được
+  judge_refine.py  §3.3 vòng soi-và-sửa nhãn Hard bằng model trọng tài khác dòng với cả
+                3 model CMCV; phần không tự cứu được thì xếp ưu tiên sang chú thích tay
+  costmodel.py  mô hình chi phí — GPU-giờ (target tự host) + USD/trang (2 external qua API)
 run_demo.py     benchmark trên corpus tổng hợp, 2 chế độ giả định
 ```
 
@@ -25,6 +40,7 @@ run_demo.py     benchmark trên corpus tổng hợp, 2 chế độ giả định
 
 ```bash
 python3 run_demo.py                       # benchmark 4 chiến lược x 2 chế độ
+python3 -m ddas.testkit.demo_judge_refine  # §3.3: vòng judge-and-refine, trọng tài giả lập
 python3 -c "from ddas.costmodel import *; print(render(ddas_plan(), 256))"
 ```
 
@@ -69,9 +85,9 @@ của bạn, nơi khác biệt giữa các loại tinh tế hơn nhiều.
 
 | # | Thay đổi | Lý do | Đo được |
 |---|----------|-------|---------|
-| 1 | **Cascade CMCV** — chỉ gọi Qwen3-VL-30B khi MinerU và PaddleOCR bất đồng | Easy chỉ cần MinerU đồng thuận với *ít nhất một* external, nên khi 2 model rẻ đã khớp thì kết luận không đổi | −46.5% GPU-hours, nhãn **giống hệt** |
+| 1 | **Cascade CMCV** — chỉ gọi Gemini 3 Pro khi Qwen3-VL (target) và Mistral OCR bất đồng | Easy chỉ cần target đồng thuận với *ít nhất một* external, nên khi 2 model rẻ đã khớp thì kết luận không đổi | −46.5% chi phí, nhãn **giống hệt** |
 | 2 | **Probe-and-extrapolate** | Quyết định *lấy mẫu ở đâu* không cần CMCV toàn pool, chỉ cần phân bố độ khó mỗi cụm | CMCV cho khâu lấy mẫu chỉ trên ~3% pool, sai số ước lượng trung vị 0.04 |
-| 3 | **Element-CMCV dẫn xuất** | Đầu ra trang đã chứa element; chỉ cần căn bbox (Hungarian) rồi áp lại độ đo | ~0 GPU-hour thay vì nhân 3 lượt suy luận trên ~1.8B element |
+| 3 | **Element-CMCV dẫn xuất** | Layout detection (Heron) chạy 1 lần/trang candidate ra bbox+class; nội dung tra theo IoU từ output CMCV trang đã có sẵn, không suy luận 3 model CMCV thêm lần nào | 0 lượt suy luận CMCV thêm trên ~1.8B element (chỉ tốn 1 lượt Heron/trang, xem costmodel.py) thay vì nhân 3 |
 | 4 | **Phân bổ lồng nhau + rarity có chẩn đoán** | Một lần water-fill với `w = gain × w_cụm` khiến chiều độ khó (tỉ lệ 10:1) áp đảo chiều đa dạng (2-3:1) | xem bảng dưới |
 
 ## Kết quả benchmark (ngân sách 30K mẫu, pool 300K, Zipf(1.25))
@@ -97,7 +113,8 @@ kết quả về đúng dòng "DDAS (cụm × khó)" — ×2.78 tín hiệu, kh�
    chỉ khi giả định của nó đúng trên pool — nên nó được **đo trước rồi mới bật**
    (`density.rarity_regime_check`), không bật mặc định.
 2. **CMCV chưa được hiệu chuẩn thì chưa dùng được.** Giả định "đồng thuận ⇒ đúng" phải
-   được đo trên dev-set có ground truth (`cmcv.calibrate_tau`), vì MinerU2.5 và PaddleOCR-VL
-   có thể mắc **lỗi tương quan**. Nếu `P(đúng | đồng thuận) < 0.98`, bật
+   được đo trên dev-set có ground truth (`cmcv.calibrate_tau`), vì Qwen3-VL (target) và
+   Mistral OCR có thể mắc **lỗi tương quan** — nhất là trên tiếng Việt, nơi cả hai chưa
+   chắc đã được kiểm chứng độc lập. Nếu `P(đúng | đồng thuận) < 0.98`, bật
    `require_3way_for_easy` — cascade khi đó mất tác dụng và chi phí quay về mức đầy đủ.
 # Data-Engine-3phase
