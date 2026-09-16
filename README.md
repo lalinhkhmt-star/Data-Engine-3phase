@@ -8,8 +8,8 @@ kiểu MinerU2.5-Pro, kèm CMCV (3.2) ở mức đủ để Phần 1 chạy đư
 ddas/
   config.py     cấu hình + ngân sách
   metrics.py    NED / TEDS / CDM-proxy / layout-F1  (CPU, O(n))
-  cmcv.py       CMCV có cascade — bỏ qua model đắt (Gemini 3 Pro, API) khi target (Qwen3-VL,
-                tự host) và Mistral OCR (API) đã đồng thuận
+  cmcv.py       CMCV có cascade — bỏ qua model thứ 3 (PaddleOCR-VL, tự host) khi target
+                (Qwen3-VL, tự host) và Mistral OCR (API) đã đồng thuận
   cluster.py    K-Means phân cấp + kênh tail + khử trùng lặp LSH
   density.py    độ hiếm cục bộ + chẩn đoán tự bật/tắt
   probe.py      probe-and-extrapolate: trọng số cụm từ ~3% pool
@@ -32,7 +32,34 @@ ddas/
                 (pymupdf.Story) — biến lỗi cấu trúc thành khác biệt nhìn thấy được
   judge_refine.py  §3.3 vòng soi-và-sửa nhãn Hard bằng model trọng tài khác dòng với cả
                 3 model CMCV; phần không tự cứu được thì xếp ưu tiên sang chú thích tay
+  prompts.py    §3.3 prompt trọng tài + pre-annotation (paper không cho nội dung, tự
+                thiết kế theo 3 ràng buộc rút từ chính lập luận dòng 49/51/61)
+  preannot.py   §3.3 AI pre-annotation ĐỘC LẬP (không cho model xem bản nháp hỏng) +
+                gói việc cho chuyên gia: 2 phương án + chỗ khoanh lỗi -> soát nhanh/phân xử/gõ lại
+  annot_qa.py   §3.3 QA nhãn người: hợp lệ về dạng (render lại được không) + tỉnh táo
+                nội dung + nhất quán giữa annotator (trộn lặp 5% mẫu)
+  scanqa.py     cổng chất lượng ảnh SCAN, chạy trước mọi lời gọi model (CPU): mờ/
+                phân giải/mực/tương phản/nghiêng — tách "khó vì cấu trúc" (quý) khỏi
+                "khó vì ảnh hỏng" (rác). Cắm vào CMCV qua validity_fn
+  io.py         ghi/đọc JSONL + export_dataset() xuất bộ phân tầng Stage 1/2/3 kèm
+                manifest — thiếu cái này thì chạy xong là mất sạch
   costmodel.py  mô hình chi phí — GPU-giờ (target tự host) + USD/trang (2 external qua API)
+  clients/      LỚP NỐI MODEL THẬT (mốc M0) — trước đây toàn bộ repo chạy bằng
+                ParseResult giả lập, chưa gọi model nào lần nào
+    base.py         retry phân biệt lỗi tạm thời/lỗi của ta + token-bucket
+                    rate-limit + circuit-breaker + đếm chi phí thật
+    cache.py        cache đĩa khoá theo NỘI DUNG (model+prompt+bytes ảnh) —
+                    bắt buộc: chạy lại pipeline không được trả tiền API lần hai
+    pagestore.py    page_id -> ảnh (ảnh rời hoặc "file.pdf#7"), LRU, chuẩn hoá
+                    cỡ ảnh tất định để khoá cache ổn định
+    normalize.py    quy output 3 nhà cung cấp về 1 ParseResult: bản đồ nhãn về
+                    taxonomy chung (layout_sim đòi khớp chuỗi CHÍNH XÁC) + đổi
+                    bbox về pixel tuyệt đối của ảnh PageStore trả về
+    qwen_vl.py      TARGET_MODEL qua vLLM     (OpenAI chat-completions)
+    mistral_ocr.py  CHEAP_EXTERNAL qua API    (dò cả shape structured lẫn markdown)
+    paddle_vl.py    EXPENSIVE_EXTERNAL tự host (extract_fn cắm được theo cách deploy)
+    openai_compat.py  dùng chung cho Qwen tự host và GPT-5 trọng tài §3.3
+    gemini.py       Gemini 3 Pro — CHỈ cho pre-annotation §3.3
 run_demo.py     benchmark trên corpus tổng hợp, 2 chế độ giả định
 ```
 
@@ -41,8 +68,33 @@ run_demo.py     benchmark trên corpus tổng hợp, 2 chế độ giả định
 ```bash
 python3 run_demo.py                       # benchmark 4 chiến lược x 2 chế độ
 python3 -m ddas.testkit.demo_judge_refine  # §3.3: vòng judge-and-refine, trọng tài giả lập
+python3 -m ddas.testkit.demo_clients       # lớp client: 22 kiểm tra qua HTTP thật trên localhost
+python3 -m ddas.testkit.demo_elements      # Stage 2 mức element: 18 kiểm tra (chặn "đồng thuận rỗng")
 python3 -c "from ddas.costmodel import *; print(render(ddas_plan(), 256))"
 ```
+
+## Chạy trên model thật
+
+`demo_clients.py` dựng stub HTTP nói đúng giao thức của 4 nhà cung cấp và chạy
+cả CMCV lẫn vòng judge qua đó — kiểm được retry/cache/circuit-breaker/hệ toạ độ
+mà không tốn tiền, và có chốt chặn mọi kết nối ra ngoài localhost.
+
+Khi đã có endpoint/key thật, chạy preflight TRƯỚC mỗi đợt lớn:
+
+```bash
+export QWEN_BASE_URL=http://<vllm-host>:8000/v1   # target, tự host
+export MISTRAL_API_KEY=...                        # cheap external
+export PADDLE_VL_URL=http://<host>:8080/layout-parsing   # expensive external, tự host
+export OPENAI_API_KEY=...                         # trọng tài §3.3
+export GEMINI_API_KEY=...                         # pre-annotation §3.3
+
+python3 -m ddas.testkit.preflight --pages data/vietnamese_sample/invoices --no-cache
+```
+
+Preflight kiểm ba loại lỗi chỉ lộ ra khi gọi thật và đều hỏng ÂM THẦM: shape
+response khác dự đoán, hệ toạ độ bbox sai, và model tự "sửa hộ" nội dung. Nó
+KHÔNG thay thế `calibrate_tau()` — preflight trả lời "đường ống có thông
+không", không trả lời "đồng thuận có nghĩa là đúng không".
 
 ## Kiểm chứng model nhúng bằng dữ liệu thật
 
@@ -81,14 +133,16 @@ loại bố cục dựng tay khác biệt quá lộ liễu (bảng có viền v�
 riêng). Kết luận thật về việc có cần layout-prior hay không phải chạy trên dữ liệu PDF thật
 của bạn, nơi khác biệt giữa các loại tinh tế hơn nhiều.
 
-## Bốn thay đổi so với mô tả trong paper
+## Sáu thay đổi so với mô tả trong paper
 
 | # | Thay đổi | Lý do | Đo được |
 |---|----------|-------|---------|
-| 1 | **Cascade CMCV** — chỉ gọi Gemini 3 Pro khi Qwen3-VL (target) và Mistral OCR bất đồng | Easy chỉ cần target đồng thuận với *ít nhất một* external, nên khi 2 model rẻ đã khớp thì kết luận không đổi | −46.5% chi phí, nhãn **giống hệt** |
-| 2 | **Probe-and-extrapolate** | Quyết định *lấy mẫu ở đâu* không cần CMCV toàn pool, chỉ cần phân bố độ khó mỗi cụm | CMCV cho khâu lấy mẫu chỉ trên ~3% pool, sai số ước lượng trung vị 0.04 |
+| 1 | **Cascade CMCV** — chỉ gọi PaddleOCR-VL khi Qwen3-VL (target) và Mistral OCR bất đồng | Easy chỉ cần target đồng thuận với *ít nhất một* external, nên khi 2 model rẻ đã khớp thì kết luận không đổi | −46.5% GPU-giờ của model thứ 3, nhãn **giống hệt** |
+| 2 | **Empirical-Bayes shrink cho trọng số cụm** | Bản thân việc dò một mẫu nhỏ mỗi cụm rồi mở rộng LÀ mô tả của paper ("*An initial uniform sample from each cluster is evaluated by page-level CMCV*"), không phải thay đổi — chỉ phần co ước lượng về prior toàn cục mới là bổ sung | sai số ước lượng trung vị 0.04 trên ~3% pool |
 | 3 | **Element-CMCV dẫn xuất** | Layout detection (Heron) chạy 1 lần/trang candidate ra bbox+class; nội dung tra theo IoU từ output CMCV trang đã có sẵn, không suy luận 3 model CMCV thêm lần nào | 0 lượt suy luận CMCV thêm trên ~1.8B element (chỉ tốn 1 lượt Heron/trang, xem costmodel.py) thay vì nhân 3 |
 | 4 | **Phân bổ lồng nhau + rarity có chẩn đoán** | Một lần water-fill với `w = gain × w_cụm` khiến chiều độ khó (tỉ lệ 10:1) áp đảo chiều đa dạng (2-3:1) | xem bảng dưới |
+| 5 | **Layout detector = Docling Layout Heron**, không phải "MinerU2.5 and PaddleOCR-VL layout detection models" như paper | Cần một nguồn bbox ĐỘC LẬP với cả 3 model CMCV. Dùng chính PaddleOCR-VL (đang là model thứ 3 của pool CMCV) làm layout detector sẽ phá vỡ tính độc lập đó | 17 lớp, xem layout_heron.py |
+| 6 | **TEDS/CDM dùng bản proxy CPU O(n)**, không phải apted-TEDS / CDM render-based như paper | Phải chạy trên hàng chục triệu trang; bản chính thức cắm qua cùng chữ ký hàm khi cần | HỆ QUẢ: τ hiệu chuẩn trên proxy chỉ nhất quán nội bộ, **không so sánh được với số của bất kỳ paper nào** |
 
 ## Kết quả benchmark (ngân sách 30K mẫu, pool 300K, Zipf(1.25))
 

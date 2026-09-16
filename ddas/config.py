@@ -7,15 +7,34 @@ SUBTASKS = ("layout", "text", "formula", "table")
 
 @dataclass
 class EmbedConfig:
-    """Biểu diễn trang: visual (ViT-base) + layout-prior (task-aware)."""
-    vit_name: str = "facebook/dinov2-base"      # 768-d CLS
+    """Biểu diễn trang: visual + layout-prior (tuỳ chọn).
+
+    Hai mặc định dưới đây ĐÃ ĐO, không phải phỏng đoán — xem
+    data/EMBEDDING_EVAL_REPORT.md và data/results_*.json (300 trang DocLayNet,
+    GPU thật). NMI phân cụm theo 6 loại tài liệu:
+
+        model              vit    layout   vit+layout
+        CLIP-B/32         0.468    0.151      0.359     <- ghép làm TỆ ĐI
+        DINOv2-base       0.196    0.151      0.239     <- ghép giúp
+        DiT-base          0.211    0.151      0.143
+        DINOv2-small      0.155    0.151      0.159
+
+    Đọc ra hai điều: (1) CLIP hơn DINOv2-base 2.4 lần, nên đổi encoder;
+    (2) layout-prior chỉ cứu được encoder YẾU — với encoder mạnh nó chỉ pha
+    loãng tín hiệu, làm rơi NMI 23%. Nên layout_weight mặc định = 0.
+    CẢNH BÁO: số trên đo ở trang born-digital DocLayNet (tiếng Anh). Với pool
+    scan, layout-prior đến từ Heron chứ không phải text layer PDF, chưa đo —
+    nếu muốn bật lại thì đo trước, đừng chỉnh mù.
+    """
+    vit_name: str = "openai/clip-vit-base-patch32"   # đo được NMI 0.468, hơn DINOv2-base (0.196)
     pca_dim: int = 512                           # -> 512-d như paper
     layout_dim: int = 24                         # histogram loại element + mật độ + #cột
     visual_weight: float = 1.0
-    layout_weight: float = 0.6                   # task-aware: tách trang theo cấu trúc, không chỉ "nhìn giống nhau"
-    # Nguồn layout-prior: 'pdf' (PyMuPDF, CPU, ~free) cho born-digital,
-    # 'docling-layout-heron' (RT-DETRv2, GPU) cho trang scan — xem layout_heron.py.
-    layout_source_order: Tuple[str, ...] = ("pdf", "docling-layout-heron")
+    layout_weight: float = 0.0                   # xem bảng trên: ghép vào làm tệ đi với encoder mạnh
+    # Pool mục tiêu là 100% tài liệu SCAN nên không còn nguồn 'pdf' (text layer
+    # PyMuPDF) — trang scan không có text layer, layout_prior.py trả vector ~0.
+    # Chỉ còn Heron (RT-DETRv2, GPU) — xem layout_heron.py.
+    layout_source_order: Tuple[str, ...] = ("docling-layout-heron",)
     batch_size: int = 512
     fp16: bool = True
 
@@ -106,6 +125,17 @@ class JudgeRefineConfig:
     # chí ưu tiên #1 (correction efficiency) khi xếp hàng đợi người.
     min_confidence: float = 0.70
     expert_budget: int = 192_000    # số mẫu chú thích tay, theo paper (dòng 66)
+    # TRẦN số mẫu Hard được đưa vào vòng Judge-and-Refine. KHÔNG có trong paper
+    # nhưng bắt buộc phải có: paper nói §3.3 xử lý "Hard samples" mà không nói
+    # bao nhiêu, còn tổng kết dòng 66 chỉ nhắc 192K mẫu chú thích tay. Chạy
+    # đúng chữ (toàn bộ Hard) thì ở quy mô 60M trang x 30 element x ~12% Hard
+    # = 216M mẫu, nhân 2 vòng x 2 ảnh => ~$22M chỉ riêng tiền gọi trọng tài,
+    # gấp ~80 lần toàn bộ §3.1+§3.2 (xem costmodel.judge_refine_plan).
+    # Đặt trần rồi chọn mẫu theo ưu tiên: cần `expert_budget` mẫu ra người, với
+    # resolve_rate ~45% thì đưa vào khoảng expert_budget/(1-resolve_rate) là đủ,
+    # cộng hệ số an toàn. Phần Hard vượt trần KHÔNG bị vứt — nằm lại hàng đợi,
+    # chạy đợt sau khi còn ngân sách.
+    judge_budget: int = 400_000
 
 
 @dataclass

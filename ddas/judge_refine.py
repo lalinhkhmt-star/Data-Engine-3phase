@@ -15,11 +15,16 @@ train sẽ bơm nhiễu vào tập nhãn (paper dòng 45). Module này làm hai 
 Chọn model trọng tài — CHỦ Ý LỆCH so với paper, đọc kỹ trước khi đổi:
 paper dùng Qwen3-VL-235B và lập luận rằng nó "độc lập với CMCV model pool".
 Lập luận đó vốn đã yếu (pool của paper có Qwen3-VL-30B — cùng dòng model, lỗi
-tương quan là chuyện bình thường), và ở repo này thì sai hẳn: TARGET_MODEL
-chính là Qwen3-VL-8B, còn Gemini 3 Pro đã làm trọng tài trong CMCV. Nếu trọng
-tài §3.3 cũng thuộc hai dòng đó, nó sẽ "đồng cảm" đúng những lỗi mà CMCV đã bỏ
-sót — tức tầng sửa lỗi mù đúng chỗ cần sáng nhất. Nên mặc định lấy dòng thứ tư
-(OpenAI), đúng gợi ý đã ghi ở cmcv.py:20.
+tương quan là chuyện bình thường), và ở repo này càng phải tránh: pool CMCV
+hiện là Qwen3-VL-8B (target, Alibaba) / Mistral OCR (cheap, Mistral AI) /
+PaddleOCR-VL (expensive, Baidu/ERNIE — xem cmcv.py). Trọng tài §3.3 thuộc
+CÙNG lineage nào trong ba dòng đó cũng sẽ "đồng cảm" đúng lỗi mà CMCV đã bỏ
+sót — tầng sửa lỗi mù đúng chỗ cần sáng nhất (đây chính là lý do Chandra OCR
+bị loại khỏi pool CMCV: kiến trúc dựa trên Qwen3VL, xem cmcv.py). Nên mặc
+định lấy dòng thứ tư (OpenAI, JUDGE_MODEL bên dưới), khác hẳn cả ba. Dòng thứ
+năm (Google, Gemini 3 Pro) CHỦ Ý để dành riêng cho pre-annotation ở tầng chú
+thích người (dòng 64 paper) — không dùng ở đây, nếu không hai vai trò "độc
+lập với pool" sẽ lại đụng nhau.
 """
 from __future__ import annotations
 
@@ -106,6 +111,36 @@ Outcome = Union[RefinedRecord, ExpertItem]
 
 # judge_fn(ảnh gốc, ảnh render | None, nội dung hiện tại, subtask) -> JudgeVerdict
 JudgeFn = Callable[[Image.Image, Optional[Image.Image], str, str], JudgeVerdict]
+
+# call_model(system, user_text, images) -> text thô của model. Đây là RANH GIỚI
+# tới nhà cung cấp: đổi OpenAI/Google/tự host chỉ cần thay hàm này, không đụng
+# vào prompt lẫn vòng lặp.
+CallModel = Callable[[str, str, List[Image.Image]], str]
+
+
+def make_judge_fn(call_model: CallModel) -> JudgeFn:
+    """Dựng JudgeFn thật từ một hàm gọi model, dùng prompt trong prompts.py.
+
+    Khi model trả về thứ không parse được thành verdict, KHÔNG coi là "sạch"
+    (làm vậy sẽ lùa nhãn chưa kiểm tra vào tập train) mà báo có lỗi với
+    confidence 0 — mẫu rơi xuống hàng đợi người ở nhóm "làm lại từ đầu", đúng
+    với thực tế là ta không biết gì về nó.
+    """
+    from .prompts import JUDGE_SYSTEM, judge_user_prompt, parse_verdict
+
+    def judge_fn(orig: Image.Image, shot: Optional[Image.Image],
+                 content: str, subtask: str) -> JudgeVerdict:
+        images = [orig] if shot is None else [orig, shot]
+        raw = call_model(JUDGE_SYSTEM,
+                         judge_user_prompt(content, subtask, shot is not None),
+                         images)
+        d = parse_verdict(raw)
+        if d is None:
+            return JudgeVerdict(True, 0.0, None,
+                                "trọng tài trả về output không parse được thành verdict")
+        return JudgeVerdict(d["has_error"], d["confidence"], d["corrected"], d["note"])
+
+    return judge_fn
 
 
 class JudgeRefine:
@@ -227,6 +262,58 @@ def weakness_by_subtask(records: Sequence[CMCVRecord]) -> Dict[str, float]:
             if vals:
                 acc.setdefault(st, []).append(float(np.mean(vals)))
     return {st: 1.0 - float(np.mean(v)) for st, v in acc.items()}
+
+
+def select_for_judging(queue: Sequence[HardItem], budget: int,
+                       weakness: Optional[Dict[str, float]] = None,
+                       floor_per_subtask: int = 1000,
+                       seed: int = 0) -> Tuple[List[HardItem], List[HardItem]]:
+    """Chọn mẫu Hard nào được vào vòng Judge-and-Refine, trong giới hạn `budget`.
+
+    Vì sao cần (paper không có bước này): §3.3 chạy trên TOÀN BỘ Hard thì ở quy
+    mô thật tốn gấp ~80 lần cả §3.1+§3.2 cộng lại — xem JudgeRefineConfig.judge_budget.
+
+    Cách chia: ngân sách phân theo subtask tỉ lệ với ĐỘ YẾU của model (subtask
+    nào model sai nhiều thì sửa ở đó đáng tiền nhất), nhưng mỗi subtask có sàn
+    để không subtask nào bị bỏ trắng — cùng tinh thần với sampler.allocate_nested.
+    Mẫu vượt trần trả về ở `deferred`, KHÔNG vứt: chạy đợt sau khi còn ngân sách.
+    """
+    if budget <= 0 or len(queue) <= budget:
+        return list(queue), []
+
+    by_st: Dict[str, List[HardItem]] = {}
+    for it in queue:
+        by_st.setdefault(it.subtask, []).append(it)
+
+    w = weakness or {}
+    scores = {st: max(w.get(st, 0.0), 1e-6) for st in by_st}
+    total = sum(scores.values())
+    floor = min(floor_per_subtask, budget // max(1, len(by_st)))
+
+    quota: Dict[str, int] = {}
+    for st, items in by_st.items():
+        q = int(budget * scores[st] / total)
+        quota[st] = min(len(items), max(floor, q))
+
+    # Thừa/thiếu sau khi làm tròn và chạm trần -> chia lại cho subtask còn dư mẫu.
+    left = budget - sum(quota.values())
+    for st in sorted(by_st, key=lambda s: -scores[s]):
+        if left <= 0:
+            break
+        room = len(by_st[st]) - quota[st]
+        take = min(room, left)
+        quota[st] += take
+        left -= take
+
+    rng = np.random.default_rng(seed)
+    selected: List[HardItem] = []
+    deferred: List[HardItem] = []
+    for st, items in by_st.items():
+        idx = rng.permutation(len(items))       # trong cùng subtask thì không có
+        k = quota[st]                           # tín hiệu nào để ưu tiên -> bốc ngẫu nhiên
+        selected.extend(items[i] for i in idx[:k])
+        deferred.extend(items[i] for i in idx[k:])
+    return selected, deferred
 
 
 def prioritize(items: Sequence[ExpertItem],

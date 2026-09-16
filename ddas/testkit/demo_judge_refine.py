@@ -8,15 +8,20 @@ Phần render thì chạy THẬT (matplotlib mathtext / pymupdf.Story).
 """
 from __future__ import annotations
 
+import os
+import tempfile
+
 import numpy as np
 from PIL import Image
 
-from ddas.cmcv import Tier
+from ddas.annot_qa import check_annotation, inter_annotator_agreement, qa_summary
+from ddas.cmcv import CMCVRecord, Tier
 from ddas.config import JudgeRefineConfig
 from ddas.judge_refine import (JudgeRefine, JudgeVerdict, prioritize, summarize,
                                weakness_by_subtask)
-from ddas.cmcv import CMCVRecord
-from ddas.sft import HardItem
+from ddas.io import export_dataset, load_dataclass
+from ddas.preannot import build_expert_batch, workload_summary
+from ddas.sft import HardItem, SFTRecord, split_training_stages
 
 # Mỗi mẫu dựng để rơi vào đúng MỘT lối thoát của vòng lặp.
 QUEUE = [
@@ -54,6 +59,13 @@ def fake_page_image(page_id: str) -> Image.Image:
     return Image.new("RGB", (800, 1000), "white")
 
 
+def fake_preannot(image: Image.Image, subtask: str) -> str:
+    """Pre-annotation giả lập — p3 trả ra đúng bản nháp (hai nguồn đồng thuận ->
+    việc 'soát nhanh'), còn lại trả khác đi (-> việc 'phân xử')."""
+    return {"formula": r"\alpha + \beta", "table": "<table><tr><td>y</td></tr></table>"}.get(
+        subtask, "bản chú thích đề xuất")
+
+
 def main() -> None:
     judge = FakeJudge()
     cfg = JudgeRefineConfig(max_rounds=3)
@@ -86,6 +98,51 @@ def main() -> None:
     for st, s in summarize(refined, expert).items():
         print(f"  {st:8} refined={s['refined']} expert={s['expert']} "
               f"tự cứu={100*s['resolve_rate']:.0f}% lý do={s['lý do']}")
+
+    # ---- tầng người: AI pre-annotation độc lập + gói việc (§3.3 dòng 64) ----
+    ranked = prioritize(expert, w, cfg.min_confidence)
+    tasks = build_expert_batch(ranked, fake_page_image, fake_preannot)
+    print("\n-- gói việc cho chuyên gia (kèm pre-annotation độc lập) --")
+    for t in tasks:
+        ag = "—" if t.agreement is None else f"{t.agreement:.2f}"
+        print(f"  {t.subtask:8} {t.page_id}  [{t.mode:10}] trùng khớp A/B={ag:>5}  {t.reason}")
+    print("  khối lượng:", {k: v if isinstance(v, int) else f"{v['n']} ({v['%']:.0f}%)"
+                            for k, v in workload_summary(tasks).items()})
+
+    # ---- QA tự động trên nhãn người (§3.3 dòng 64) ----
+    finished = [("formula", r"\frac{a}{b}"), ("table", "<table><tr><td>a</td></tr></table>"),
+                ("formula", r"\frac{a}{"), ("text", ""), ("text", "Hoá đơn [?] giá trị")]
+    results = [check_annotation(c, st, page_id=f"qa{i}") for i, (st, c) in enumerate(finished)]
+    print("\n-- QA nhãn người --")
+    for r in results:
+        print(f"  {r.subtask:8} {r.page_id}  {'SẠCH' if r.ok else '; '.join(str(i) for i in r.issues)[:95]}")
+    print("  tổng kết:", qa_summary(results))
+
+    iaa = inter_annotator_agreement([
+        ("text", "Công ty Nước ép Ngọc Trang", "Công ty Nước ép Ngọc Trang"),
+        ("text", "Phiếu nhập kho", "Phiêu nhâp kho"),       # annotator B rụng dấu
+    ])
+    print(f"  nhất quán giữa annotator: {iaa['theo_subtask']}")
+
+    # ---- phân tầng Stage 2 (SFT) vs Stage 3 (GRPO) (§3.3 dòng 66) ----
+    expert_done = [SFTRecord(t.subtask, t.page_id, Tier.HARD, "expert",
+                             t.preannot or t.draft or "") for t in tasks]
+    s2, s3 = split_training_stages(expert_done, w, grpo_ratio=0.30)
+    print("\n-- phân tầng giai đoạn train --")
+    print(f"  Stage 2 (SFT) : {len(s2)} mẫu  {[r.subtask for r in s2]}")
+    print(f"  Stage 3 (GRPO): {len(s3)} mẫu  {[r.subtask for r in s3]}  "
+          f"(chỉ subtask chấm tự động được)")
+
+    # ---- xuất ra đĩa (io.py) ----
+    out_dir = os.path.join(tempfile.gettempdir(), "ddas_demo_export")
+    manifest = export_dataset(out_dir, stage2=s2, stage3=s3,
+                              expert_queue=ranked, refined=refined)
+    print(f"\n-- xuất dữ liệu ra {out_dir} --")
+    for tầng, info in manifest["tầng"].items():
+        print(f"  {tầng:15} {info['n']:>3} mẫu -> {info['file']}")
+    back = load_dataclass(os.path.join(out_dir, "stage2_sft.jsonl"), SFTRecord)
+    print(f"  đọc lại stage2: {len(back)} mẫu, tier={back[0].tier}, "
+          f"khớp gốc={len(back) == len(s2)}")
 
 
 if __name__ == "__main__":

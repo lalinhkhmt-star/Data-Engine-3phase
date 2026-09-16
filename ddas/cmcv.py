@@ -4,26 +4,38 @@ Bộ 3 model chọn riêng cho tiếng Việt (thay cho MinerU2.5 gốc — Mine
 luyện chủ yếu trên corpus tiếng Trung/Anh, không phải mục tiêu tối ưu ở đây):
   - TARGET_MODEL (Qwen3-VL, TỰ HOST) là model đang được cải thiện — output
     của nó trên trang Easy trở thành nhãn SFT, nên phải là model bạn thực sự
-    định tiếp tục fine-tune. Hai model dưới đây gọi qua API, KHÔNG fine-tune
-    được (closed-weight) nên không thể làm target.
+    định tiếp tục fine-tune.
   - CHEAP_EXTERNAL (Mistral OCR, qua API) — $4/1000 trang, output có sẵn
     bbox + 13 loại block + bảng/công thức dạng structured JSON, khớp gần
     đúng format ParseResult cần, không phải tự parse text thô.
-  - EXPENSIVE_EXTERNAL (Gemini 3 Pro, qua API) — trọng tài cho case Hard,
-    chỉ gọi khi cascade không cắt được nên tần suất thấp, chấp nhận giá cao
-    hơn ($2/$12 mỗi triệu token in/out). LƯU Ý: Gemini 2.5 Pro đã bị Google
-    khai tử (16/10/2026) — đừng dùng nhầm bản cũ.
-  - Cả hai external đều khác lineage với target (Mistral Pháp, Google Mỹ,
-    Qwen Alibaba Trung Quốc) nên "đồng thuận" có ý nghĩa thật — nhưng vẫn
+  - EXPENSIVE_EXTERNAL (PaddleOCR-VL, TỰ HOST) — trọng tài cho case Hard, chỉ
+    gọi khi cascade không cắt được nên tần suất thấp. Tên biến kế thừa từ bản
+    paper gốc (nơi model thứ 3 là API đắt) — ở đây "expensive" chỉ còn nghĩa
+    "gọi hiếm qua cascade", KHÔNG còn nghĩa đắt tiền: PaddleOCR-VL tự host,
+    0.9B tham số (ERNIE-4.5-0.3B + visual encoder), đo được 1.224 trang/s
+    trên 1 A100 (FastDeploy backend nhanh hơn, 1.618 trang/s) — thực ra RẺ
+    hơn cả TARGET_MODEL (8B). Chỉ tốn GPU-giờ, không có dòng chi phí API nào
+    cho model này (xem costmodel.py).
+  - Ba model khác hẳn lineage nhau — Qwen (Alibaba, Trung Quốc), Mistral OCR
+    (Mistral AI, Pháp), PaddleOCR-VL (Baidu/ERNIE, Trung Quốc nhưng KHÁC tổ
+    chức và KHÁC kiến trúc với Qwen) — nên "đồng thuận" có ý nghĩa thật. Vẫn
     PHẢI đo lại trên dev-set tiếng Việt bằng calibrate_tau() trước khi tin,
-    đừng mặc định giả định "đồng thuận ⇒ đúng". Nếu nghi lỗi tương quan giữa
-    2 external, dùng key GPT-4o/GPT-5 (ChatGPT) làm model thứ 3 kiểm tra.
+    đừng mặc định giả định "đồng thuận ⇒ đúng". CẢNH BÁO đã loại một ứng viên
+    khác vì lý do này: Chandra OCR (Datalab) benchmark rất mạnh nhưng kiến
+    trúc dựa THẲNG trên Qwen3VL — cùng lineage với target, dùng làm trọng tài
+    sẽ tái lặp đúng lỗi IMIC/UACS mà CMCV sinh ra để tránh (paper dòng 29).
+  - CHỦ Ý không dùng Gemini 3 Pro ở đây: nó được dành riêng cho pre-annotation
+    ở §3.3 (xem judge_refine.py) — pool CMCV và model pre-annotation phải
+    khác nhau, nếu không sẽ rò rỉ đúng thứ paper §3.3 dòng 64 nói cần tránh
+    ("independence from the CMCV model pool, thereby avoiding data leakage").
+    Nếu nghi lỗi tương quan giữa 2 external, dùng key GPT-5 (OpenAI) làm
+    model thứ 4 kiểm tra — vẫn khác lineage với cả 3 model trong pool.
 
 Điểm cốt lõi so với bản trong paper: thứ tự đánh giá được sắp xếp lại thành
 cascade *không đổi nhãn* (lossless). Vì Easy chỉ cần target đồng thuận với
-ÍT NHẤT MỘT external model, nên khi target ~ Mistral OCR (rẻ) ta đã kết luận
-được Easy mà không cần gọi Gemini 3 Pro (đắt hơn nhiều lần trên mỗi trang).
-=> tiết kiệm phần lớn lời gọi model đắt nhất, nhãn cuối hoàn toàn giống hệt.
+ÍT NHẤT MỘT external model, nên khi target ~ Mistral OCR đã kết luận được
+Easy mà không cần chạy PaddleOCR-VL nữa => tiết kiệm GPU-giờ của model thứ 3,
+nhãn cuối hoàn toàn giống hệt.
 """
 from __future__ import annotations
 
@@ -38,7 +50,7 @@ from .metrics import SIM_FN, layout_sim
 
 TARGET_MODEL = "qwen3-vl-8b"                # model đang được cải thiện — TỰ HOST
 CHEAP_EXTERNAL = "mistral-ocr-4"            # qua API, ~$4/1000 trang, chạy được trên toàn pool
-EXPENSIVE_EXTERNAL = "gemini-3-pro"         # qua API, trọng tài, chỉ gọi khi cascade không cắt được
+EXPENSIVE_EXTERNAL = "paddleocr-vl"         # TỰ HOST (0.9B, ERNIE-4.5), trọng tài, chỉ gọi khi cascade không cắt được
 EXTERNALS = (CHEAP_EXTERNAL, EXPENSIVE_EXTERNAL)
 
 
@@ -59,6 +71,17 @@ class ParseResult:
     labels: List[str] = field(default_factory=list)
     formulas: List[str] = field(default_factory=list)   # LaTeX, theo thứ tự đọc
     tables: List[str] = field(default_factory=list)     # HTML, theo thứ tự đọc
+    # Nội dung theo TỪNG block, căn 1-1 với `boxes`/`labels`. Rỗng = model/adapter
+    # không cung cấp được nội dung theo block.
+    #
+    # Vì sao phải có, dù `text` ở trên đã chứa toàn bộ chữ của trang: `text` là
+    # chuỗi ĐàGHÉP, không tách lại được theo block. Stage 2 (element.py) so
+    # sánh nội dung TỪNG VÙNG giữa các model, nên chỉ có chuỗi ghép là không đủ.
+    # Thiếu trường này, element.py buộc phải gán nội dung rỗng cho mọi element
+    # text — mà hai nội dung rỗng thì "đồng thuận" tuyệt đối và sinh nhãn EASY
+    # RỖNG cho đúng subtask có ngân sách lớn nhất (25M/60M). Đó là lỗi thật đã
+    # tồn tại trong repo này, xem testkit/demo_elements.py.
+    contents: List[str] = field(default_factory=list)
     latency_ms: float = 0.0
 
 
@@ -99,8 +122,20 @@ def assign_tier(s_mp: float, s_mq: Optional[float], s_pq: Optional[float],
 
     s_mq / s_pq = None nghĩa là cascade đã cắt sớm (chưa chạy model đắt).
     """
-    if s_mq is None:                       # cascade đã cắt => chắc chắn Easy
-        return Tier.EASY
+    if s_mq is None:
+        # KHÔNG có ý kiến của model thứ 3. Có hai nguyên nhân rất khác nhau và
+        # tuyệt đối không được gộp:
+        #   (a) cascade cắt sớm vì target ~ cheap ĐàĐỒNG THUẬN  -> Easy, đúng.
+        #   (b) model thứ 3 không chạy, hoặc không phủ vùng bbox này (mức
+        #       element) -> ta không biết gì thêm, mà target/cheap có thể đang
+        #       bất đồng nặng.
+        # Bản trước trả EASY cho cả hai. Ở mức trang (b) không xảy ra nên không
+        # lộ, nhưng ở mức element thì element bất đồng nặng được gán EASY kèm
+        # nhãn sai của target. Neo lại vào đúng điều kiện mà cascade dùng để
+        # cắt: chỉ Easy khi target và cheap thật sự đồng thuận.
+        if require_3way:
+            return Tier.HARD        # cần 3 ý kiến mà chỉ có 2 -> chưa xác nhận được
+        return Tier.EASY if s_mp >= tau else Tier.HARD
     agree_mp, agree_mq = s_mp >= tau, s_mq >= tau
     if require_3way:
         if agree_mp and agree_mq:
@@ -125,7 +160,7 @@ class CMCV:
     """Chạy CMCV trên một trang. `runners` là dict model_name -> callable(page)->ParseResult.
 
     Cascade tiết kiệm: gọi target (Qwen3-VL, tự host) + Mistral OCR (API) trước;
-    chỉ gọi model đắt (Gemini 3 Pro, API) khi tồn tại subtask mà hai model rẻ
+    chỉ gọi model thứ 3 (PaddleOCR-VL, tự host) khi tồn tại subtask mà target/cheap
     bất đồng.
     """
 

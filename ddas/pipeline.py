@@ -20,6 +20,10 @@ có nghĩa element của nó được chọn cho text/formula/table, và ngượ
 
   [11] judge_refine §3.3 — render-then-verify sửa nhãn Hard, phần không cứu được
        xếp ưu tiên sang chú thích tay (judge_refine.py) -- run_judge_refine()
+  [12] expert_annot §3.3 — AI pre-annotation độc lập + gói việc cho chuyên gia
+       (preannot.py); QA nhãn người bằng annot_qa.py -- run_expert_annotation()
+  [13] phân tầng train — Easy/Medium -> Stage 1; Hard đã chú thích tay chia
+       Stage 2 (SFT) / Stage 3 (GRPO) theo sft.py::split_training_stages()
 
 Đầu ra: SFT set cho Easy/Medium (dùng ngay) + mẫu Hard đã được §3.3 sửa +
 hàng đợi chú thích tay đã xếp ưu tiên, kèm toàn bộ metadata để tái lập.
@@ -37,8 +41,10 @@ from .cluster import ClusterIndex, dedup_within_cluster, hierarchical_cluster
 from .cmcv import CMCVRecord, ParseResult, Tier
 from .config import DDASConfig, SUBTASKS
 from .element import Element, build_elements, cluster_and_sample, embed_elements
-from .judge_refine import JudgeFn, JudgeRefine, prioritize, weakness_by_subtask
+from .judge_refine import (ExpertItem, JudgeFn, JudgeRefine, prioritize,
+                           select_for_judging, weakness_by_subtask)
 from .layout_heron import LayoutBox
+from .preannot import build_expert_batch, workload_summary
 from .probe import ClusterStat, cluster_weights, expand_quota, probe_size
 from .sampler import Allocation, allocate_nested, draw
 from .sft import HardItem, assemble_sft_set
@@ -211,25 +217,49 @@ class DDASPipeline:
                          expert_budget: Optional[int] = None):
         """Tiêu thụ hàng đợi Hard của assemble_sft_set() — xem ddas.judge_refine.
 
-        Trả về (refined, expert): `refined` là mẫu Hard đã sửa được tự động,
-        `.to_sft()` để gộp vào SFT set; `expert` là hàng đợi chú thích tay ĐÃ
-        xếp ưu tiên, cắt theo `expert_budget`.
+        Trả về (refined, expert, deferred): `refined` là mẫu Hard đã sửa được
+        tự động, `.to_sft()` để gộp vào SFT set; `expert` là hàng đợi chú thích
+        tay ĐÃ xếp ưu tiên, cắt theo `expert_budget`; `deferred` là mẫu Hard
+        vượt `judge_budget`, chưa xử lý, để dành đợt sau.
 
         `cmcv_records` (từ §3.2) chỉ dùng để tính độ yếu theo subtask cho tiêu
         chí ưu tiên #2 — bỏ trống thì chỉ xếp theo tiêu chí #1.
         """
         cfg = self.cfg.judge
-        jr = JudgeRefine(judge_fn, image_fn, cfg)
-        refined, expert = jr.run(hard_queue)
         weakness = weakness_by_subtask(cmcv_records) if cmcv_records else None
+
+        # Chặn trần TRƯỚC khi gọi model — chạy hết Hard thì vỡ ngân sách, xem
+        # JudgeRefineConfig.judge_budget.
+        selected, deferred = select_for_judging(hard_queue, cfg.judge_budget, weakness)
+
+        jr = JudgeRefine(judge_fn, image_fn, cfg)
+        refined, expert = jr.run(selected)
         expert = prioritize(expert, weakness, cfg.min_confidence,
                             expert_budget or cfg.expert_budget)
         self.reports.append(StageReport("judge_refine", len(hard_queue), len(refined),
-                                        {"người": len(expert),
+                                        {"vào vòng": len(selected),
+                                         "hoãn lại": len(deferred),
+                                         "người": len(expert),
                                          "tự cứu %": 100 * jr.resolve_rate,
                                          "vòng/mẫu": jr.mean_rounds,
                                          "render lỗi": jr.stats["render_failed"]}))
-        return refined, expert
+        return refined, expert, deferred
+
+    # ------------------------------------------- §3.3 tầng chú thích người ----
+    def run_expert_annotation(self, expert_queue: Sequence[ExpertItem],
+                              image_fn: Callable[[str], Image.Image],
+                              preannot_fn=None):
+        """Gói hàng đợi người thành ExpertTask kèm AI pre-annotation (dòng 64).
+
+        `preannot_fn=None` -> bỏ qua bước pre-annotation, vẫn ra ExpertTask hợp
+        lệ (mọi việc rơi vào kiểu "gõ lại"). Xem ddas.preannot.
+        """
+        tasks = build_expert_batch(expert_queue, image_fn, preannot_fn)
+        load = workload_summary(tasks)
+        self.reports.append(StageReport("expert_annot", len(expert_queue), len(tasks),
+                                        {m: load[m]["n"] for m in
+                                         ("soát nhanh", "phân xử", "gõ lại")}))
+        return tasks
 
     def summary(self) -> str:
         return "\n".join(str(r) for r in self.reports)

@@ -116,3 +116,50 @@ def summarize(sft_ready: List[SFTRecord], hard_queue: List[HardItem]) -> Dict[st
         hard_n = sum(1 for h in hard_queue if h.subtask == st)
         out[st] = {"sft_ready": ready_n, "hard_queue": hard_n}
     return out
+
+
+# ------------------------------------------- phân tầng theo giai đoạn train --
+#
+# Paper dòng 66: "65.5M Easy and Medium samples ... Stage 1 pre-training; 192K
+# expert-annotated Hard samples are used for Stage 2 fine-tuning AND Stage 3
+# GRPO alignment" — nói cả hai giai đoạn dùng chung tập 192K nhưng KHÔNG cho
+# tiêu chí chia. Tiêu chí dưới đây là tự đề xuất, suy từ nhu cầu khác nhau của
+# hai thuật toán:
+#
+#   SFT (Stage 2) cần cặp (đầu vào -> MỘT đáp án đúng). Mẫu nào cũng dùng được.
+#   GRPO (Stage 3) học từ PHẦN THƯỞNG so giữa nhiều đáp án sinh ra. Muốn có
+#   gradient thì cần (a) chấm được đúng/sai TỰ ĐỘNG lúc train, và (b) model
+#   hiện còn sai thật để có cái mà so.
+#
+# => Mẫu vào GRPO phải KIỂM CHỨNG ĐƯỢC BẰNG MÁY: formula (compile + render so
+# ảnh) và table (dựng lại lưới ô so với nhãn) chấm tự động được; text và layout
+# thì không — muốn biết đúng sai phải có người, không dùng làm reward được.
+# Trong nhóm kiểm chứng được, ưu tiên mẫu CMCV bất đồng mạnh (model đang sai
+# nhiều nhất ở đó => reward có tín hiệu).
+#
+# Mẫu không vào GRPO thì về Stage 2. Không mẫu nào bị bỏ phí.
+
+GRPO_VERIFIABLE = ("formula", "table")
+
+
+def split_training_stages(expert_records: Sequence[SFTRecord],
+                          weakness: Optional[Dict[str, float]] = None,
+                          grpo_ratio: float = 0.30,
+                          ) -> Tuple[List[SFTRecord], List[SFTRecord]]:
+    """Chia tập Hard đã chú thích tay thành (stage2_sft, stage3_grpo).
+
+    `grpo_ratio` = trần tỉ lệ dành cho GRPO (mặc định 30% — GRPO cần ít dữ liệu
+    hơn SFT nhiều, và mẫu ở đây quá đắt để dồn hết vào một giai đoạn). CHƯA
+    hiệu chỉnh: con số đúng chỉ biết được sau khi chạy thử cả hai giai đoạn.
+    `weakness` (từ judge_refine.weakness_by_subtask) để xếp trong nhóm kiểm
+    chứng được, subtask nào model yếu nhất thì vào GRPO trước.
+    """
+    w = weakness or {}
+    verifiable = [r for r in expert_records if r.subtask in GRPO_VERIFIABLE]
+    rest = [r for r in expert_records if r.subtask not in GRPO_VERIFIABLE]
+
+    verifiable.sort(key=lambda r: -w.get(r.subtask, 0.0))
+    cap = int(len(expert_records) * grpo_ratio)
+    grpo = verifiable[:cap]
+    sft = verifiable[cap:] + rest
+    return sft, grpo

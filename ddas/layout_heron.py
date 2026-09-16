@@ -17,10 +17,11 @@ Output dùng cho 2 việc:
      GIỚI HẠN THẬT (không che giấu, cùng tinh thần layout_prior.py): Heron
      chỉ detect bbox+class, KHÔNG có cỡ chữ — 6 chiều font_stats [18:24]
      luôn bằng 0 cho trang scan, khác trang PDF born-digital có cỡ chữ thật.
-  2. Bbox+class trả về (LayoutBox) có thể dùng làm điểm neo bbox độc lập cho
-     CMCV/element-level (Stage 2) trên trang scan, đóng vai trò tương tự
-     text layer PDF ở trang born-digital — SIC: đây là lựa chọn kiến trúc,
-     chưa nối vào element.py, xem TODO cuối file.
+  2. Bbox+class trả về (LayoutBox) là nguồn neo bbox ĐỘC LẬP cho CMCV mức
+     element (Stage 2), đóng vai trò tương tự text layer PDF ở trang
+     born-digital. ĐÃ nối: element.py::derive_element_cmcv() nhận thẳng
+     `layout_boxes` từ đây rồi mới tra nội dung của 3 model CMCV theo IoU —
+     Heron chạy TRƯỚC, CMCV chạy SAU (xem đầu file element.py).
 """
 from __future__ import annotations
 
@@ -232,10 +233,3 @@ def layout_prior_from_heron(dets: List[LayoutBox], page_wh: Tuple[float, float])
     vec = np.concatenate([density_block, col_onehot, content_hist, font_stats]).astype(np.float32)
     assert vec.shape[0] == LAYOUT_DIM, vec.shape
     return vec
-
-
-# TODO: nối HeronLayoutDetector.detect() làm nguồn bbox cho element.py trên
-# trang scan (hiện element.py chỉ lấy bbox từ ParseResult của 3 model CMCV,
-# đúng cho trang PDF nơi model tự detect layout; với trang scan có thể muốn
-# dùng bbox Heron làm điểm neo thay vì tin riêng lẻ từng VLM) — CHƯA LÀM,
-# cần quyết định kiến trúc trước khi viết (xem trao đổi trong phiên làm việc).

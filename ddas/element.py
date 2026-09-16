@@ -42,16 +42,47 @@ class Element:
     sims: Dict[str, Optional[float]]
 
 
-def _elements_of(r: ParseResult) -> List[Tuple[str, np.ndarray, str]]:
-    """Làm phẳng ParseResult thành (etype, box, content), khớp theo thứ tự đọc."""
-    out, fi, ti = [], 0, 0
-    for box, lab in zip(r.boxes, r.labels):
-        if lab == "formula":
-            out.append(("formula", box, r.formulas[fi] if fi < len(r.formulas) else "")); fi += 1
+# Nhãn block -> subtask huấn luyện. Tiêu đề/mục danh sách/chú thích LÀ text,
+# nên chúng phải rơi vào subtask 'text'. Trước đây phép ghép so nhãn đã-gộp
+# ("text") với nhãn anchor chưa gộp ("title") nên KHÔNG BAO GIỜ khớp, khiến
+# mọi element title/list/caption bị gán Hard rồi rơi khỏi cả 3 subtask — bị
+# loại âm thầm khỏi Stage 2. Giữ nhãn nguyên vẹn khi ghép, gộp về subtask SAU.
+SUBTASK_OF_LABEL = {
+    "text": "text", "title": "text", "list": "text", "caption": "text",
+    "formula": "formula", "table": "table",
+}
+
+
+def _elements_of(r: ParseResult) -> List[Tuple[str, np.ndarray, Optional[str]]]:
+    """Làm phẳng ParseResult thành (nhãn, box, nội dung) theo thứ tự đọc.
+
+    Nội dung `None` nghĩa là KHÔNG BIẾT — model này không cung cấp được nội
+    dung theo block tại vùng đó. Phân biệt None với chuỗi rỗng là bắt buộc:
+    chuỗi rỗng là một khẳng định ("vùng này không có chữ") và hai khẳng định
+    rỗng sẽ "đồng thuận" với nhau, còn None thì derive_element_cmcv gán Hard vì
+    thiếu bằng chứng. Gộp hai thứ này chính là lỗi đã sinh ra nhãn EASY RỖNG
+    cho toàn bộ subtask text.
+    """
+    out: List[Tuple[str, np.ndarray, Optional[str]]] = []
+    has_contents = len(r.contents) == len(r.labels)
+    fi = ti = 0
+    for i, (box, lab) in enumerate(zip(r.boxes, r.labels)):
+        if has_contents:
+            content: Optional[str] = r.contents[i]
+        elif lab == "formula":
+            content = r.formulas[fi] if fi < len(r.formulas) else None
         elif lab == "table":
-            out.append(("table", box, r.tables[ti] if ti < len(r.tables) else "")); ti += 1
-        elif lab in ("text", "title", "list", "caption"):
-            out.append(("text", box, ""))
+            content = r.tables[ti] if ti < len(r.tables) else None
+        else:
+            # Adapter cũ không có `contents`: nội dung text từng block KHÔNG
+            # khôi phục được từ chuỗi ghép r.text -> không biết, chứ không rỗng.
+            content = None
+        if lab == "formula":
+            fi += 1
+        elif lab == "table":
+            ti += 1
+        if lab in SUBTASK_OF_LABEL:
+            out.append((lab, box, content))
     return out
 
 
@@ -95,10 +126,21 @@ def derive_element_cmcv(page_id: str, layout_boxes: Sequence[LayoutBox],
 
     out: List[Element] = []
     for k, lb in enumerate(layout_boxes):
-        etype = lb.label
+        # `lb.label` là nhãn block (text/title/list/caption/formula/table);
+        # `etype` là SUBTASK huấn luyện mà element này thuộc về.
+        etype = SUBTASK_OF_LABEL.get(lb.label, "text")
         ca, cb, cq = ca_list[k], cb_list[k], cq_list[k]
         content = {m: c for m, c in ((TARGET_MODEL, ca), (CHEAP_EXTERNAL, cb)) if c is not None}
-        if ca is None or cb is None:
+        no_evidence = (ca is None or cb is None)
+        if not no_evidence and not ca.strip() and not cb.strip():
+            # CẢ HAI cùng rỗng. Về mặt số học đây là "đồng thuận hoàn hảo"
+            # (mọi sim = 1.0) và sẽ thành EASY với nhãn rỗng — đúng cái bẫy đã
+            # bơm nhãn rỗng vào 42% dataset. Không có nội dung thì không có gì
+            # để huấn luyện, nên coi là thiếu bằng chứng. Một bên rỗng một bên
+            # có chữ thì KHÔNG rơi vào đây: đó là bất đồng thật, cứ so bình
+            # thường rồi để điểm tương đồng thấp tự đẩy xuống Hard.
+            no_evidence = True
+        if no_evidence:
             # target hoặc cheap-external không có nội dung khớp bbox này ->
             # không đủ bằng chứng so sánh -> không đoán, gán thẳng Hard.
             out.append(Element(page_id, k, etype, lb.box, content, Tier.HARD,
@@ -106,7 +148,7 @@ def derive_element_cmcv(page_id: str, layout_boxes: Sequence[LayoutBox],
             continue
         fn = SIM_FN[etype] if etype in SIM_FN else SIM_FN["text"]
         tau = cfg.tau[etype]
-        s_mp = fn(ca, cb) if etype != "text" else 1.0 if not (ca or cb) else fn(ca, cb)
+        s_mp = fn(ca, cb)
         s_mq = fn(ca, cq) if cq is not None else None
         s_pq = fn(cb, cq) if cq is not None else None
         tier = assign_tier(s_mp, s_mq, s_pq, tau, cfg.require_3way_for_easy)
