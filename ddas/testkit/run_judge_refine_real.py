@@ -24,6 +24,13 @@ import os
 import sys
 from pathlib import Path
 
+# Nạp .env NGAY ĐẦU module — trước khi bất kỳ chỗ nào đọc os.environ. Biến đã
+# export sẵn trong shell luôn thắng (python-dotenv mặc định override=False),
+# .env chỉ điền chỗ trống. Không có .env thì im lặng bỏ qua (find_dotenv()
+# trả rỗng), không lỗi.
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv()
+
 from ..cmcv import Tier
 from ..config import JudgeRefineConfig
 from ..judge_refine import JudgeRefine, make_judge_fn

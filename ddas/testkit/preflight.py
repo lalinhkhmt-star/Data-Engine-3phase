@@ -25,6 +25,13 @@ import sys
 import time
 from typing import Dict, List
 
+# Nạp .env NGAY ĐẦU module — trước khi bất kỳ chỗ nào đọc os.environ. Biến đã
+# export sẵn trong shell luôn thắng (python-dotenv mặc định override=False),
+# .env chỉ điền chỗ trống. Không có .env thì im lặng bỏ qua (find_dotenv()
+# trả rỗng), không lỗi.
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv()
+
 from ..clients import ClientError, build_clients, env_report
 from ..clients.normalize import is_empty_result
 

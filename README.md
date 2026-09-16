@@ -73,11 +73,29 @@ python3 -m ddas.testkit.demo_elements      # Stage 2 mức element: 18 kiểm tr
 python3 -c "from ddas.costmodel import *; print(render(ddas_plan(), 256))"
 ```
 
+## Cấu hình model thật — file .env
+
+```bash
+cp .env.example .env    # rồi điền key/endpoint thật vào .env
+```
+
+`.env` KHÔNG được commit (đã trong .gitignore) — chỉ `.env.example` nằm trong
+git làm mẫu. Ba entry point sau tự nạp `.env` khi khởi động (`load_dotenv()`,
+biến đã `export` sẵn trong shell luôn thắng, `.env` chỉ điền chỗ trống):
+
+```bash
+uvicorn ddas.webapp.app:app --reload --port 8000     # web UI
+python3 -m ddas.testkit.preflight --pages <thư mục>  # kiểm 1 trang qua từng model
+python3 -m ddas.testkit.run_judge_refine_real         # §3.3 thật, chỉ cần OPENAI_API_KEY
+```
+
+Không dùng entry point nào trong 3 cái trên (vd. viết script riêng) thì tự gọi
+`from dotenv import load_dotenv; load_dotenv()` trước khi import `ddas.clients`.
+
 ## Web UI — test pipeline trên 1 ảnh, xem từng giai đoạn + log real-time
 
 ```bash
 pip install fastapi uvicorn python-multipart   # đã có sẵn trong môi trường này
-export QWEN_BASE_URL=... MISTRAL_API_KEY=... PADDLE_VL_URL=... OPENAI_API_KEY=... GEMINI_API_KEY=...
 uvicorn ddas.webapp.app:app --reload --port 8000
 # mở http://localhost:8000
 ```
