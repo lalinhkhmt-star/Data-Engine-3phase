@@ -1,2 +1,4 @@
 .venv-embed/
 data/
+.cache/
+ddas/webapp/uploads/

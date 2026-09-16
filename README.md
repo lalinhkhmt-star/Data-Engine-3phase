@@ -73,6 +73,26 @@ python3 -m ddas.testkit.demo_elements      # Stage 2 mức element: 18 kiểm tr
 python3 -c "from ddas.costmodel import *; print(render(ddas_plan(), 256))"
 ```
 
+## Web UI — test pipeline trên 1 ảnh, xem từng giai đoạn + log real-time
+
+```bash
+pip install fastapi uvicorn python-multipart   # đã có sẵn trong môi trường này
+export QWEN_BASE_URL=... MISTRAL_API_KEY=... PADDLE_VL_URL=... OPENAI_API_KEY=... GEMINI_API_KEY=...
+uvicorn ddas.webapp.app:app --reload --port 8000
+# mở http://localhost:8000
+```
+
+Kéo thả 1 ảnh trang, bấm "Chạy pipeline" — trang hiển thị 9 cột (mỗi giai
+đoạn 1 cột: ingest, scanqa, embed, layout, cmcv, elements, judge_refine,
+preannot, tổng kết), log đổ vào real-time qua SSE khi từng bước chạy xong.
+Badge trên đầu trang báo ngay vai nào đã cấu hình trước khi bấm chạy.
+
+Đây là công cụ TEST/DEV — không auth, 1 process, không thiết kế cho nhiều
+người dùng đồng thời. Vai nào thiếu key thì giai đoạn đó tự báo và bỏ qua
+(không giả lập, không âm thầm coi như sạch) — xem `ddas/webapp/runner.py`.
+Bước quy mô pool (cluster/probe/expand) không áp dụng cho 1 ảnh nên bỏ qua,
+bắt đầu thẳng từ scanqa.
+
 ## Chạy trên model thật
 
 `demo_clients.py` dựng stub HTTP nói đúng giao thức của 4 nhà cung cấp và chạy

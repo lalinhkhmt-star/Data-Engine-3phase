@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>DDAS — test pipeline trên 1 ảnh</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --border: #2a313c; --text: #e6edf3;
+    --muted: #8b949e; --blue: #58a6ff; --green: #3fb950; --orange: #d29922;
+    --red: #f85149; --purple: #bc8cff; --mono: ui-monospace, "SF Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border);
+           display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #env-badges { display: flex; gap: 6px; flex-wrap: wrap; font-size: 11px; }
+  .badge { padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
+  .badge.on { color: var(--green); border-color: var(--green); }
+  .badge.off { color: var(--muted); }
+
+  #controls { padding: 16px 24px; border-bottom: 1px solid var(--border);
+              display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  #controls label { font-size: 13px; color: var(--muted); display: flex;
+                     align-items: center; gap: 6px; }
+  #drop { border: 2px dashed var(--border); border-radius: 8px; padding: 10px 16px;
+          font-size: 13px; color: var(--muted); cursor: pointer; }
+  #drop.drag { border-color: var(--blue); color: var(--blue); }
+  #preview { max-height: 60px; border-radius: 4px; display: none; }
+  button#run { background: var(--blue); color: #001830; border: none;
+               padding: 8px 20px; border-radius: 6px; font-weight: 600;
+               cursor: pointer; font-size: 13px; }
+  button#run:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+
+  #board { display: flex; gap: 1px; background: var(--border); overflow-x: auto;
+           height: calc(100vh - 132px); }
+  .col { background: var(--panel); min-width: 240px; flex: 1; display: flex;
+         flex-direction: column; }
+  .col-head { padding: 10px 12px; border-bottom: 1px solid var(--border);
+              font-size: 12px; font-weight: 600; display: flex;
+              align-items: center; justify-content: space-between;
+              position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .status-dot.start { background: var(--blue); animation: pulse 1s infinite; }
+  .status-dot.ok, .status-dot.done { background: var(--green); }
+  .status-dot.warn { background: var(--orange); }
+  .status-dot.error, .status-dot.fatal { background: var(--red); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  .col-body { flex: 1; overflow-y: auto; padding: 8px; font-family: var(--mono);
+              font-size: 11.5px; line-height: 1.5; }
+  .ev { padding: 4px 6px; border-radius: 4px; margin-bottom: 3px; white-space: pre-wrap;
+        word-break: break-word; }
+  .ev.log { color: var(--muted); }
+  .ev.start { color: var(--blue); }
+  .ev.ok, .ev.done { color: var(--green); }
+  .ev.warn { color: var(--orange); background: rgba(210,153,34,.08); }
+  .ev.error, .ev.fatal { color: var(--red); background: rgba(248,81,73,.08); }
+  .ev .data { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
+  #summary { padding: 12px 24px; border-top: 1px solid var(--border); font-size: 12px;
+             color: var(--muted); display: none; }
+  #summary.show { display: block; }
+  #summary b { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DDAS — test pipeline trên 1 ảnh</h1>
+  <div id="env-badges"></div>
+</header>
+
+<div id="controls">
+  <div id="drop">kéo thả ảnh vào đây, hoặc bấm để chọn</div>
+  <input type="file" id="file-input" accept="image/*" style="display:none">
+  <img id="preview" alt="preview">
+  <label><input type="checkbox" id="sub-text" checked> text</label>
+  <label><input type="checkbox" id="sub-formula" checked> formula</label>
+  <label><input type="checkbox" id="sub-table" checked> table</label>
+  <label><input type="checkbox" id="force-scanqa"> bỏ qua cổng scanqa</label>
+  <label>Heron:
+    <select id="heron-device">
+      <option value="cpu">cpu</option>
+      <option value="cuda">cuda</option>
+    </select>
+  </label>
+  <button id="run" disabled>Chạy pipeline</button>
+</div>
+
+<div id="board"></div>
+<div id="summary"></div>
+
+<script>
+const STAGES = [
+  ["ingest", "1. Ingest"], ["scanqa", "2. Scan QA"], ["embed", "3. Embed (CLIP)"],
+  ["layout", "4. Layout (Heron)"], ["cmcv", "5. CMCV (3 model)"],
+  ["elements", "6. Elements"], ["judge_refine", "7. Judge-and-Refine"],
+  ["preannot", "8. Pre-annotation"], ["done", "9. Tổng kết"],
+];
+
+const board = document.getElementById("board");
+const cols = {};
+for (const [key, title] of STAGES) {
+  const col = document.createElement("div");
+  col.className = "col";
+  col.innerHTML = `<div class="col-head"><span>${title}</span><span class="status-dot" id="dot-${key}"></span></div>
+                    <div class="col-body" id="body-${key}"></div>`;
+  board.appendChild(col);
+  cols[key] = { body: col.querySelector(".col-body"), dot: col.querySelector(".status-dot") };
+}
+
+function addEvent(ev) {
+  const c = cols[ev.stage] || cols["done"];
+  if (["start", "ok", "done", "warn", "error", "fatal"].includes(ev.status)) {
+    c.dot.className = "status-dot " + ev.status;
+  }
+  const div = document.createElement("div");
+  div.className = "ev " + ev.status;
+  div.textContent = ev.message;
+  if (ev.data && Object.keys(ev.data).length) {
+    const extra = { ...ev.data };
+    // các trường đã lộ trong message thì bớt lặp lại trong khối data
+    delete extra.reasons;
+    const keys = Object.keys(extra).filter(k => !["boxes"].includes(k));
+    if (keys.length) {
+      const d = document.createElement("div");
+      d.className = "data";
+      d.textContent = keys.map(k => `${k}=${JSON.stringify(extra[k])}`).join("  ");
+      div.appendChild(d);
+    }
+  }
+  c.body.appendChild(div);
+  c.body.scrollTop = c.body.scrollHeight;
+}
+
+// -------------------------------------------------------------- env badges
+fetch("/api/env").then(r => r.json()).then(env => {
+  const box = document.getElementById("env-badges");
+  for (const [k, v] of Object.entries(env)) {
+    const b = document.createElement("span");
+    b.className = "badge " + (v ? "on" : "off");
+    b.textContent = (v ? "✓ " : "✗ ") + k;
+    box.appendChild(b);
+  }
+});
+
+// ------------------------------------------------------------------ upload
+let selectedFile = null;
+const drop = document.getElementById("drop");
+const fileInput = document.getElementById("file-input");
+const preview = document.getElementById("preview");
+const runBtn = document.getElementById("run");
+
+function pickFile(f) {
+  if (!f) return;
+  selectedFile = f;
+  drop.textContent = f.name;
+  preview.src = URL.createObjectURL(f);
+  preview.style.display = "inline-block";
+  runBtn.disabled = false;
+}
+drop.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", e => pickFile(e.target.files[0]));
+["dragover", "dragleave", "drop"].forEach(evt =>
+  drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.toggle("drag", evt === "dragover"); }));
+drop.addEventListener("drop", e => pickFile(e.dataTransfer.files[0]));
+
+// -------------------------------------------------------------------- run
+runBtn.addEventListener("click", async () => {
+  if (!selectedFile) return;
+  runBtn.disabled = true;
+  runBtn.textContent = "Đang chạy…";
+  for (const key of Object.keys(cols)) {
+    cols[key].body.innerHTML = "";
+    cols[key].dot.className = "status-dot";
+  }
+  document.getElementById("summary").classList.remove("show");
+
+  const subtasks = ["text", "formula", "table"]
+    .filter(s => document.getElementById("sub-" + s).checked).join(",");
+  const fd = new FormData();
+  fd.append("image", selectedFile);
+  fd.append("subtasks", subtasks);
+  fd.append("force_scanqa", document.getElementById("force-scanqa").checked);
+  fd.append("heron_device", document.getElementById("heron-device").value);
+
+  let runId;
+  try {
+    const res = await fetch("/api/run", { method: "POST", body: fd });
+    ({ run_id: runId } = await res.json());
+  } catch (e) {
+    addEvent({ stage: "done", status: "fatal", message: "Không gọi được /api/run: " + e });
+    runBtn.disabled = false; runBtn.textContent = "Chạy pipeline";
+    return;
+  }
+
+  const es = new EventSource(`/api/stream/${runId}`);
+  es.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    addEvent(ev);
+    if (ev.stage === "done") {
+      const s = document.getElementById("summary");
+      s.className = "show";
+      s.innerHTML = `<b>Hoàn tất</b> — ${ev.message}. ` +
+        (ev.data && ev.data.client_stats
+          ? `Số liệu gọi model: <code>${JSON.stringify(ev.data.client_stats)}</code>`
+          : "");
+    }
+  };
+  es.addEventListener("end", () => {
+    es.close();
+    runBtn.disabled = false;
+    runBtn.textContent = "Chạy pipeline";
+  });
+  es.onerror = () => {
+    es.close();
+    runBtn.disabled = false;
+    runBtn.textContent = "Chạy pipeline";
+  };
+});
+</script>
+</body>
+</html>
