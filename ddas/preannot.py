@@ -37,7 +37,7 @@ from .element import crop_box
 from .judge_refine import CallModel, ExpertItem
 from .metrics import SIM_FN
 
-PREANNOT_MODEL = "gemini-3-pro"      # dòng 64 paper; rảnh vai vì không nằm trong pool CMCV
+PREANNOT_MODEL = "gemini-3.1-pro-preview"  # xem clients/gemini.py — "gemini-3-pro" không phải id thật
 
 # preannot_fn(ảnh gốc, subtask) -> nội dung chú thích đề xuất ("" nếu model bó tay)
 PreannotFn = Callable[[Image.Image, str], str]

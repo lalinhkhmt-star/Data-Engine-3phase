@@ -15,7 +15,9 @@ Bản đồ vai -> nhà cung cấp (lý do chọn nằm ở cmcv.py và judge_re
     CHEAP_EXTERNAL     mistral-ocr-4  API, $/trang        mistral_ocr.py
     EXPENSIVE_EXTERNAL paddleocr-vl   tự host             paddle_vl.py
     JUDGE_MODEL §3.3   gpt-5          API, $/token        openai_compat.py
-    PREANNOT §3.3      gemini-3-pro   API, $/token        gemini.py
+    PREANNOT §3.3      gemini-3.1-pro-preview  API, $/token   gemini.py
+                       ("gemini-3-pro" — tên paper dùng — không phải id thật
+                       trong API Google, xem clients/gemini.py)
 
 Năm dòng model khác lineage nhau — điều kiện để "đồng thuận" và "trọng tài" có
 nghĩa thật, chứ không phải ba biến thể của cùng một họ cùng sai một kiểu.
@@ -135,7 +137,7 @@ def build_clients(*, pages_root: str,
                   mistral_url: Optional[str] = None,
                   judge_model: str = "gpt-5",
                   judge_base_url: Optional[str] = None,
-                  preannot_model: str = "gemini-3-pro",
+                  preannot_model: str = "gemini-3.1-pro-preview",
                   preannot_base_url: Optional[str] = None,
                   dpi: int = 200, max_side: int = 1600,
                   mistral_rps: float = 4.0,
@@ -163,7 +165,8 @@ def build_clients(*, pages_root: str,
         url = qwen_base_url or os.environ.get("QWEN_BASE_URL", "")
         if url:
             from .qwen_vl import build_qwen_runner
-            r = build_qwen_runner(url, qwen_model, image_fn,
+            model = os.environ.get("QWEN_MODEL", qwen_model)
+            r = build_qwen_runner(url, model, image_fn,
                                   model_name=TARGET_MODEL, cache=cache)
             runners[TARGET_MODEL] = SafeRunner(r, TARGET_MODEL)
             raw[TARGET_MODEL] = r.client
@@ -199,12 +202,25 @@ def build_clients(*, pages_root: str,
         if os.environ.get("OPENAI_API_KEY"):
             from ..judge_refine import make_judge_fn
             from .openai_compat import OpenAICompatClient, OpenAICompatConfig
+            judge_model = os.environ.get("OPENAI_MODEL", judge_model)
             c = OpenAICompatClient(
                 OpenAICompatConfig(model=judge_model,
                                    base_url=(judge_base_url
                                              or os.environ.get("OPENAI_BASE_URL")
                                              or "https://api.openai.com/v1"),
-                                   max_tokens=8192), cache)
+                                   max_tokens=8192,
+                                   # GPT-5 và các model reasoning đời mới của
+                                   # OpenAI từ chối "max_tokens" (400 Bad
+                                   # Request), đòi "max_completion_tokens"; và
+                                   # từ chối mọi temperature khác mặc định
+                                   # ("Only the default (1) value is
+                                   # supported") — cả hai đo thật lúc
+                                   # preflight. Endpoint tự host (Qwen qua
+                                   # vLLM) thì vẫn dùng mặc định "max_tokens"
+                                   # + temperature=0.0, xem qwen_vl.py.
+                                   max_tokens_param="max_completion_tokens",
+                                   temperature=None),
+                cache)
             judge_fn = make_judge_fn(c.as_call_model("judge-v1"))
             raw[judge_model] = c
         else:

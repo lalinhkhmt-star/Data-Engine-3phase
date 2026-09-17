@@ -72,7 +72,9 @@ def main() -> int:
         OpenAICompatConfig(model=os.environ.get("JUDGE_MODEL", "gpt-5"),
                            base_url=os.environ.get("OPENAI_BASE_URL",
                                                     "https://api.openai.com/v1"),
-                           max_tokens=8192),
+                           max_tokens=8192,
+                           max_tokens_param="max_completion_tokens",
+                           temperature=None),
         cache)
     judge_fn = make_judge_fn(client.as_call_model("judge-v1"))
 

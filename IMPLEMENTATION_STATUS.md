@@ -174,14 +174,56 @@ element, và chỉ sai ở một trong hai đường.
 
 ### Chưa kiểm chứng — cần làm trước khi tin kết quả
 
-1. **Chưa gọi model trọng tài thật lần nào.** Toàn bộ test dùng `FakeJudge`
-   kịch bản cố định — nó chỉ chứng minh luồng dữ liệu và 6 lối thoát chạy đúng,
-   **không** nói gì về việc render-then-verify có thật sự giúp model phát hiện
-   lỗi cấu trúc hay không. Đó chính là giả định trung tâm của §3.3.
-   → **Việc cần làm**: chạy trên vài trăm mẫu Hard thật có ground truth, đo
-   `resolve_rate` và — quan trọng hơn — tỉ lệ "sửa xong nhưng vẫn SAI" (trọng
-   tài nhận nhầm là sạch). Chỉ số thứ hai mới quyết định có được phép đưa
-   `RefinedRecord` vào tập train hay không; hiện chưa có gì đảm bảo nó thấp.
+### ĐÃ ĐO — A/B trọng tài gpt-5 vs gpt-5-mini (17/09/2026)
+
+`testkit/ab_judge_models.py` — bảng 12 dây thần kinh sọ (scan thật,
+`tmp/crops_test2/crop_00_table.jpg`), bản nháp chép đúng rồi **chèn 4 lỗi đã
+biết**, chấm trên bản `corrected` (nhãn đi vào tập train là bản đó, không phải
+phần model kể lể).
+
+| | gpt-5 | gpt-5-mini |
+|---|---|---|
+| Sai dấu ("mắt khứu giác" → "mất khứu giác") | sửa đúng | **sửa nửa vời**: ra `mắt khứu giác (mất mùi)` — sửa 1 trong 2 chỗ |
+| Ngược nghĩa ("nhìn rõ, tinh tường" → "nhìn mờ, mù") | sửa đúng | sửa đúng |
+| Sai giải phẫu ("lỗ tròn" → "lỗ bầu dục") | sửa đúng | sửa đúng |
+| Thiếu hẳn hàng XI | sửa đúng | sửa đúng |
+| **Tổng** | **4/4** | **3/4** |
+| confidence tự khai | 0.83 | **0.90** |
+| thời gian | 83s | 94s |
+| token ra | 6 581 | 6 337 |
+
+Hai kết luận:
+
+1. **gpt-5-mini tự tin hơn trong khi sai nhiều hơn** (0.90 vs 0.83). Đúng chế
+   độ hỏng nguy hiểm nhất của §3.3 — `prioritize()` tin vào `confidence` để xếp
+   ưu tiên, nên mẫu sai lại được xếp hạng cao hơn mẫu đúng.
+2. **Lỗi mini bỏ sót đúng là lỗi dấu tiếng Việt** — rủi ro đã cảnh báo từ đầu
+   ở `cmcv.py`. Mini không tiết kiệm được gì đáng kể (token ra suýt soát, còn
+   chậm hơn), nên chênh lệch chỉ nằm ở đơn giá mỗi token.
+
+**Bug tìm ra nhờ lần chạy này, đã sửa:** `response_format={"type":"json_object"}`
+chỉ ép "JSON hợp lệ", KHÔNG ép đúng schema — cả hai model đều bỏ trường
+`confidence`, `parse_verdict()` âm thầm biến thành `0.0`, khiến **mọi** mẫu
+rơi vào nhóm "làm lại từ đầu" và tiêu chí ưu tiên #1 của paper (dòng 61) chết
+hoàn toàn. Đã thêm `OpenAICompatConfig.json_schema` (structured outputs,
+strict) và đưa schema vào khoá cache. Tác dụng phụ phải biết: bật strict làm
+gpt-5 tiêu hết `max_completion_tokens=8192` rồi bị cắt giữa chừng → JSON hỏng;
+phải nâng lên 24 000 vì reasoning token tính chung hạn mức.
+
+### Chưa kiểm chứng — cần làm trước khi tin kết quả
+
+1. **Mới đo trên ĐÚNG MỘT bảng, một loại lỗi.** Bảng A/B ở trên là n=1: một ảnh,
+   bốn lỗi chèn tay. Đủ để thấy một khác biệt thật giữa hai model, KHÔNG đủ để
+   kết luận tỉ lệ. Và nó vẫn chưa trả lời câu hỏi chặn mọi thứ:
+   **tỉ lệ "sửa xong nhưng vẫn SAI"** (false-clean) — ở đây cả hai model đều báo
+   `has_error=true` nên chưa chạm tới ca đó. Muốn đo false-clean phải đưa vào
+   bản nháp ĐÚNG HOÀN TOÀN rồi xem model có bịa ra lỗi không, và bản nháp sai
+   tinh vi rồi xem nó có bỏ qua không.
+   → **Việc cần làm**: vài trăm mẫu Hard thật có ground truth, đo `resolve_rate`
+   *và* false-clean. Chỉ số thứ hai quyết định `RefinedRecord` có được phép vào
+   tập train hay không; hiện vẫn chưa có gì đảm bảo nó thấp.
+   Test tự động (`demo_judge_refine.py`) vẫn dùng `FakeJudge` kịch bản cố định —
+   nó chỉ chứng minh 6 lối thoát chạy đúng, không nói gì về chất lượng.
 
 2. **`JUDGE_MODEL` đang CỐ Ý khác paper.** Paper dùng Qwen3-VL-235B và nói nó
    "độc lập với CMCV model pool" — lập luận này không đứng vững: pool của paper

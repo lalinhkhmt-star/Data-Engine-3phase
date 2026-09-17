@@ -51,12 +51,32 @@ class OpenAICompatConfig:
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
     api_key: Optional[str] = None       # ưu tiên hơn api_key_env; vLLM có thể bỏ trống
-    temperature: float = 0.0            # bóc tách/trọng tài là tác vụ tất định
+    # bóc tách/trọng tài là tác vụ tất định nên mặc định 0.0 — nhưng model
+    # reasoning đời mới của OpenAI (GPT-5, o1, o3, ...) TỪ CHỐI mọi giá trị
+    # khác mặc định (400 "Unsupported value... Only the default (1) value is
+    # supported"), đo thật lúc preflight. None = KHÔNG gửi tham số này, để
+    # API tự dùng mặc định của nó — không hardcode 1.0 vì mặc định có thể đổi
+    # theo model/phiên bản, "không gửi" luôn an toàn hơn "đoán đúng số".
+    temperature: Optional[float] = 0.0
     max_tokens: int = 4096
+    # Tên tham số giới hạn token ra — KHÁC NHAU giữa nhà cung cấp, không phải
+    # tuỳ chọn thẩm mỹ: vLLM (Qwen tự host) nhận "max_tokens"; OpenAI với các
+    # model reasoning đời mới (GPT-5, o1, o3, ...) BẮT BUỘC "max_completion_tokens"
+    # và trả lỗi 400 nếu gửi "max_tokens" — đã đo thật lúc preflight trên GPT-5.
+    # Không tự đoán theo tên model (danh sách model reasoning còn thay đổi) —
+    # người gọi khai rõ theo từng provider, xem clients/__init__.py.
+    max_tokens_param: str = "max_tokens"
     timeout: float = 240.0
     rps: float = 0.0                    # 0 = không tự phanh (endpoint tự host)
     image_format: str = "JPEG"
     json_mode: bool = True              # ép response_format=json_object khi endpoint hỗ trợ
+    # Schema BẮT BUỘC cho output, dạng {"name": ..., "schema": {...}}. Khác
+    # json_mode ở chỗ: json_mode chỉ ép "trả JSON hợp lệ", KHÔNG ép đúng schema —
+    # ĐO THẬT trên gpt-5 và gpt-5-mini: cả hai đều bỏ trường `confidence` dù
+    # schema khai nó là required, và parse_verdict() âm thầm biến thành 0.0,
+    # làm chết tiêu chí ưu tiên #1 của §3.3 (prioritize() cần confidence >=
+    # min_confidence). Đặt json_schema thì OpenAI ép đúng schema (strict).
+    json_schema: Optional[Dict[str, Any]] = None
     extra_body: Dict[str, Any] = None   # tham số riêng của backend (vLLM: top_k, ...)
 
 
@@ -81,7 +101,12 @@ class OpenAICompatClient:
         digests = list(image_digests) or [image_digest(i) for i in images]
         ck = make_key(self.cfg.model, prompt_version or _hash_prompt(system, user_text),
                       image_digests=digests, texts=[system, user_text],
-                      params={"t": self.cfg.temperature, "max_tokens": self.cfg.max_tokens})
+                      # json_schema PHẢI nằm trong khoá: bật/tắt nó đổi hẳn output
+                      # (ép đúng schema hay không), quên thì lần bật đầu tiên sẽ
+                      # trúng cache cũ và tưởng là fix không có tác dụng.
+                      params={"t": self.cfg.temperature,
+                              self.cfg.max_tokens_param: self.cfg.max_tokens,
+                              "schema": (self.cfg.json_schema or {}).get("name")})
         if self.cache is not None:
             hit = self.cache.get(ck)
             if hit is not None:
@@ -96,10 +121,16 @@ class OpenAICompatClient:
             "model": self.cfg.model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": content}],
-            "temperature": self.cfg.temperature,
-            "max_tokens": self.cfg.max_tokens,
+            self.cfg.max_tokens_param: self.cfg.max_tokens,
         }
-        if self.cfg.json_mode:
+        if self.cfg.temperature is not None:
+            payload["temperature"] = self.cfg.temperature
+        if self.cfg.json_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"strict": True, **self.cfg.json_schema},
+            }
+        elif self.cfg.json_mode:
             payload["response_format"] = {"type": "json_object"}
         if self.cfg.extra_body:
             payload.update(self.cfg.extra_body)

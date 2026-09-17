@@ -37,7 +37,14 @@ def _inline_image(img: Image.Image, quality: int = 90) -> Dict[str, Any]:
 
 
 class GeminiClient:
-    def __init__(self, *, model: str = "gemini-3-pro",
+    # "gemini-3-pro" (tên paper dùng, dòng 64) KHÔNG phải id model thật trong
+    # API Google — đo được lúc preflight: gọi models?key=... trả về danh sách
+    # thật, "gemini-3-pro" không nằm trong đó. Gần đúng tinh thần "Gemini 3
+    # Pro" nhất trong danh sách thật là "gemini-3.1-pro-preview" (bản preview
+    # dòng 3.x mới nhất) — CHÚ Ý đây là preview, hành vi/giá/độ khả dụng có
+    # thể đổi. Muốn bản ổn định hơn thì đổi sang "gemini-2.5-pro" hoặc alias
+    # "gemini-pro-latest".
+    def __init__(self, *, model: str = "gemini-3.1-pro-preview",
                  base_url: str = GEMINI_BASE,
                  api_key_env: str = "GEMINI_API_KEY",
                  api_key: Optional[str] = None,
